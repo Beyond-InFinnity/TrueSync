@@ -21,6 +21,17 @@ import TrackLane from './components/TrackLane.jsx';
 import ContextMenu from './components/ContextMenu.jsx';
 import SubtitleTrackSelector from './components/SubtitleTrackSelector.jsx';
 
+function formatFileSize(bytes) {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  return `${(bytes / (1024 * 1024 * 1024)).toFixed(1)} GB`;
+}
+
+const KNOWN_AUDIO_EXTS = ['wav', 'mp3', 'ogg', 'flac', 'm4a'];
+const KNOWN_VIDEO_EXTS = ['mp4', 'mkv', 'webm'];
+const KNOWN_SUB_EXTS = ['ass', 'ssa'];
+
 export default function SubtitleAlignmentEditor() {
   const [assData, setAssData] = useState(null);
   const [events, setEvents] = useState([]);
@@ -45,6 +56,16 @@ export default function SubtitleAlignmentEditor() {
   const [pendingMkvData, setPendingMkvData] = useState(null);
   const [hotkeys, setHotkeys] = useState(() => JSON.parse(JSON.stringify(DEFAULT_HOTKEYS)));
   const [rebindingAction, setRebindingAction] = useState(null);
+
+  // Landing page / staging state
+  const [editorActive, setEditorActive] = useState(false);
+  const [stagedFiles, setStagedFiles] = useState([]);
+  const [stagedMkvData, setStagedMkvData] = useState(null);
+  const [isDragHover, setIsDragHover] = useState(false);
+
+  // Grid state
+  const [gridDensity, setGridDensity] = useState(1);
+  const [gridLines, setGridLines] = useState('off');
 
   const timelineRef = useRef(null);
   const videoRef = useRef(null);
@@ -126,7 +147,7 @@ export default function SubtitleAlignmentEditor() {
     return Math.max(TRACK_HEIGHT, LAYER_SUB_HEIGHT * getTrackLayers(track).length + 16);
   }, [getTrackLayers]);
 
-  // ── File loading ──
+  // ── File loading (in-editor) ──
   const handleASSFile = useCallback((file) => {
     setFileName(file.name);
     const reader = new FileReader();
@@ -142,6 +163,7 @@ export default function SubtitleAlignmentEditor() {
         const maxEnd = Math.max(...parsed.events.map((ev) => ev._end));
         setDuration((d) => Math.max(d, maxEnd + 10));
       }
+      setEditorActive(true);
     };
     reader.readAsText(file);
   }, [initHistory, setDuration]);
@@ -151,7 +173,6 @@ export default function SubtitleAlignmentEditor() {
   const handleVideoFile = useCallback(async (file) => {
     setVideoUrl(URL.createObjectURL(file));
     loadAudio(file);
-    // Attempt MKV subtitle extraction
     try {
       const arrayBuf = await file.arrayBuffer();
       const result = extractSubtitleTracks(arrayBuf);
@@ -159,15 +180,15 @@ export default function SubtitleAlignmentEditor() {
         setPendingMkvData(result);
       }
     } catch (e) {
-      // Silently ignore extraction failures — video/audio still loaded
+      // Silently ignore extraction failures
     }
   }, [loadAudio]);
 
   const routeFile = useCallback((file) => {
     const ext = file.name.split('.').pop().toLowerCase();
-    if (ext === 'ass' || ext === 'ssa') handleASSFile(file);
-    else if (['wav', 'mp3', 'ogg', 'flac', 'm4a'].includes(ext)) handleAudioFile(file);
-    else if (['mp4', 'mkv', 'webm'].includes(ext)) handleVideoFile(file);
+    if (KNOWN_SUB_EXTS.includes(ext)) handleASSFile(file);
+    else if (KNOWN_AUDIO_EXTS.includes(ext)) handleAudioFile(file);
+    else if (KNOWN_VIDEO_EXTS.includes(ext)) handleVideoFile(file);
   }, [handleASSFile, handleAudioFile, handleVideoFile]);
 
   const handleFileDrop = useCallback((e) => {
@@ -178,6 +199,69 @@ export default function SubtitleAlignmentEditor() {
   const handleFileInput = useCallback((e) => {
     for (const file of e.target.files) routeFile(file);
   }, [routeFile]);
+
+  // ── File staging (landing page) ──
+  const stageFile = useCallback(async (file) => {
+    const ext = file.name.split('.').pop().toLowerCase();
+    const id = `${Date.now()}-${Math.random()}`;
+
+    if (KNOWN_SUB_EXTS.includes(ext)) {
+      setStagedFiles(prev => [...prev, { id, name: file.name, size: file.size, file, type: 'subtitle', status: 'ready' }]);
+      return;
+    }
+
+    if (KNOWN_AUDIO_EXTS.includes(ext)) {
+      setStagedFiles(prev => [...prev, { id, name: file.name, size: file.size, file, type: 'audio', status: 'processing' }]);
+      try {
+        await loadAudio(file);
+        setStagedFiles(prev => prev.map(f => f.id === id ? { ...f, status: 'done' } : f));
+      } catch (e) {
+        setStagedFiles(prev => prev.map(f => f.id === id ? { ...f, status: 'error' } : f));
+      }
+      return;
+    }
+
+    if (KNOWN_VIDEO_EXTS.includes(ext)) {
+      setStagedFiles(prev => [...prev, { id, name: file.name, size: file.size, file, type: 'video', status: 'processing' }]);
+      setVideoUrl(URL.createObjectURL(file));
+      try {
+        const audioPromise = loadAudio(file).catch(() => null);
+        const mkvPromise = file.arrayBuffer()
+          .then(buf => extractSubtitleTracks(buf))
+          .catch(() => ({ tracks: [] }));
+        const [, mkvResult] = await Promise.all([audioPromise, mkvPromise]);
+        if (mkvResult.tracks.length > 0) {
+          setStagedMkvData(mkvResult);
+        }
+        setStagedFiles(prev => prev.map(f => f.id === id ? { ...f, status: 'done' } : f));
+      } catch (e) {
+        setStagedFiles(prev => prev.map(f => f.id === id ? { ...f, status: 'error' } : f));
+      }
+      return;
+    }
+
+    // Unknown file type
+    setStagedFiles(prev => [...prev, { id, name: file.name, size: file.size, file, type: 'unknown', status: 'error' }]);
+  }, [loadAudio]);
+
+  const handleStageDrop = useCallback((e) => {
+    e.preventDefault();
+    setIsDragHover(false);
+    for (const file of e.dataTransfer.files) stageFile(file);
+  }, [stageFile]);
+
+  const handleStageInput = useCallback((e) => {
+    for (const file of e.target.files) stageFile(file);
+  }, [stageFile]);
+
+  const handleStartEditing = useCallback(() => {
+    const assFile = stagedFiles.find(f => f.type === 'subtitle');
+    if (assFile) handleASSFile(assFile.file);
+  }, [stagedFiles, handleASSFile]);
+
+  const handleExtractMkvSubs = useCallback(() => {
+    if (stagedMkvData) setPendingMkvData(stagedMkvData);
+  }, [stagedMkvData]);
 
   // ── Export ──
   const handleExport = useCallback(() => {
@@ -218,6 +302,7 @@ export default function SubtitleAlignmentEditor() {
       setDuration((d) => Math.max(d, maxEnd + 10));
     }
     setFileName('embedded.ass');
+    setEditorActive(true);
     setPendingMkvData(null);
   }, [pendingMkvData, initHistory, setDuration]);
 
@@ -413,24 +498,145 @@ export default function SubtitleAlignmentEditor() {
   }, []);
 
   // ══════════════════════════════════════════════════════════════════════════
-  // RENDER — Drop zone
+  // RENDER — Landing page
   // ══════════════════════════════════════════════════════════════════════════
 
-  if (!assData) {
+  if (!editorActive) {
+    const hasSubtitleFile = stagedFiles.some(f => f.type === 'subtitle');
+    const hasMkvSubs = stagedMkvData && stagedMkvData.tracks.length > 0;
+    const anyProcessing = stagedFiles.some(f => f.status === 'processing');
+    const hasFiles = stagedFiles.length > 0;
+
+    let startDisabledReason = null;
+    if (!hasSubtitleFile && !hasMkvSubs) {
+      startDisabledReason = 'Load an .ass subtitle file, or an MKV with embedded subtitles';
+    } else if (anyProcessing) {
+      startDisabledReason = 'Waiting for files to finish processing...';
+    }
+
     return (
       <div style={{ background: THEME.bg, color: THEME.text, width: '100vw', height: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center', fontFamily: "'DM Sans', system-ui, sans-serif" }}
-        onDragOver={(e) => e.preventDefault()} onDrop={handleFileDrop}>
-        <div style={{ textAlign: 'center', padding: 48, border: `2px dashed ${THEME.border}`, borderRadius: 16, maxWidth: 560 }}>
+        onDragOver={(e) => { e.preventDefault(); setIsDragHover(true); }}
+        onDragLeave={(e) => { if (e.currentTarget === e.target) setIsDragHover(false); }}
+        onDrop={handleStageDrop}>
+        <style>{`@keyframes sae-spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }`}</style>
+
+        <div style={{
+          textAlign: 'center', padding: 48, border: `2px dashed ${isDragHover ? THEME.accent : THEME.border}`,
+          borderRadius: 16, maxWidth: 560, width: '90vw',
+          background: isDragHover ? THEME.selection : 'transparent',
+          transition: 'border-color 0.15s, background 0.15s',
+        }}>
           <div style={{ fontSize: 48, marginBottom: 16 }}>⟐</div>
           <h1 style={{ fontSize: 28, fontWeight: 700, margin: '0 0 8px', letterSpacing: '-0.02em' }}>Subtitle Alignment Editor</h1>
-          <p style={{ color: THEME.textDim, fontSize: 14, margin: '0 0 32px', lineHeight: 1.6 }}>
-            Drop files to begin — .ass subtitle file (required),<br />audio (.wav/.mp3/.flac) or video (.mp4/.mkv/.webm)
+          <p style={{ color: THEME.textDim, fontSize: 14, margin: '0 0 24px', lineHeight: 1.6 }}>
+            Drop files to begin — .ass subtitle, audio, or video
           </p>
+
           <label style={{ display: 'inline-block', padding: '10px 24px', background: THEME.accent, color: '#000', borderRadius: 8, fontWeight: 600, fontSize: 14, cursor: 'pointer' }}>
             Choose Files
-            <input type="file" multiple accept=".ass,.ssa,.wav,.mp3,.ogg,.flac,.m4a,.mp4,.mkv,.webm" onChange={handleFileInput} style={{ display: 'none' }} />
+            <input type="file" multiple accept=".ass,.ssa,.wav,.mp3,.ogg,.flac,.m4a,.mp4,.mkv,.webm" onChange={handleStageInput} style={{ display: 'none' }} />
           </label>
+
+          {/* ── File list ── */}
+          {hasFiles && (
+            <div style={{ marginTop: 24, textAlign: 'left', background: THEME.surface, border: `1px solid ${THEME.border}`, borderRadius: 8, overflow: 'hidden' }}>
+              {stagedFiles.map((f) => {
+                const isError = f.status === 'error';
+                const isProcessing = f.status === 'processing';
+                const isDone = f.status === 'done' || f.status === 'ready';
+                return (
+                  <div key={f.id} style={{
+                    display: 'flex', alignItems: 'center', gap: 10, padding: '10px 16px',
+                    borderBottom: `1px solid ${THEME.border}`, fontSize: 13,
+                    color: isError ? '#E57373' : THEME.text,
+                  }}>
+                    {/* Status icon */}
+                    {isProcessing && (
+                      <span style={{ display: 'inline-block', animation: 'sae-spin 1s linear infinite', fontSize: 14, color: THEME.accent, flexShrink: 0, width: 16, textAlign: 'center' }}>⟳</span>
+                    )}
+                    {isDone && (
+                      <span style={{ color: '#81C784', fontSize: 14, flexShrink: 0, width: 16, textAlign: 'center' }}>✓</span>
+                    )}
+                    {isError && (
+                      <span style={{ color: '#E57373', fontSize: 14, flexShrink: 0, width: 16, textAlign: 'center' }}>✗</span>
+                    )}
+
+                    {/* File name and size */}
+                    <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontFamily: "'JetBrains Mono', monospace", fontSize: 12 }}>
+                      {f.name}
+                    </span>
+                    <span style={{ color: THEME.textDim, fontSize: 11, flexShrink: 0, fontFamily: "'JetBrains Mono', monospace" }}>
+                      {formatFileSize(f.size)}
+                    </span>
+
+                    {/* Type badge */}
+                    <span style={{
+                      fontSize: 10, padding: '1px 6px', borderRadius: 3, flexShrink: 0, fontWeight: 600,
+                      background: f.type === 'subtitle' ? '#4FC3F744' : f.type === 'video' ? '#CE93D844' : f.type === 'audio' ? '#81C78444' : '#E5737344',
+                      color: f.type === 'subtitle' ? '#4FC3F7' : f.type === 'video' ? '#CE93D8' : f.type === 'audio' ? '#81C784' : '#E57373',
+                    }}>
+                      {f.type === 'unknown' ? 'unsupported' : f.type}
+                    </span>
+                  </div>
+                );
+              })}
+
+              {/* MKV subtitle info */}
+              {hasMkvSubs && (
+                <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '8px 16px', fontSize: 12, color: THEME.accent, background: `${THEME.accent}11` }}>
+                  <span style={{ width: 16, textAlign: 'center', flexShrink: 0 }}>♫</span>
+                  <span>{stagedMkvData.tracks.length} embedded subtitle track{stagedMkvData.tracks.length !== 1 ? 's' : ''} found in MKV</span>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* ── Action buttons ── */}
+          {hasFiles && (
+            <div style={{ marginTop: 20, display: 'flex', gap: 8, justifyContent: 'center', flexWrap: 'wrap' }}>
+              {hasSubtitleFile ? (
+                <button onClick={handleStartEditing} disabled={!!startDisabledReason}
+                  title={startDisabledReason || 'Open the editor with the loaded subtitle file'}
+                  style={{
+                    padding: '10px 28px', background: startDisabledReason ? THEME.surfaceLight : THEME.accent,
+                    color: startDisabledReason ? THEME.textMuted : '#000', border: 'none', borderRadius: 8,
+                    fontWeight: 600, fontSize: 14, cursor: startDisabledReason ? 'default' : 'pointer',
+                    opacity: startDisabledReason ? 0.6 : 1,
+                  }}>
+                  Start Editing
+                </button>
+              ) : hasMkvSubs ? (
+                <button onClick={handleExtractMkvSubs} disabled={anyProcessing}
+                  title={anyProcessing ? 'Waiting for files to finish processing...' : 'Choose a subtitle track to extract from the MKV'}
+                  style={{
+                    padding: '10px 28px', background: anyProcessing ? THEME.surfaceLight : THEME.accent,
+                    color: anyProcessing ? THEME.textMuted : '#000', border: 'none', borderRadius: 8,
+                    fontWeight: 600, fontSize: 14, cursor: anyProcessing ? 'default' : 'pointer',
+                    opacity: anyProcessing ? 0.6 : 1,
+                  }}>
+                  Extract Subtitles from MKV
+                </button>
+              ) : (
+                <button disabled title={startDisabledReason}
+                  style={{
+                    padding: '10px 28px', background: THEME.surfaceLight, color: THEME.textMuted,
+                    border: 'none', borderRadius: 8, fontWeight: 600, fontSize: 14, cursor: 'default', opacity: 0.6,
+                  }}>
+                  Start Editing
+                </button>
+              )}
+            </div>
+          )}
         </div>
+
+        {/* MKV track selector overlay */}
+        {pendingMkvData && (
+          <SubtitleTrackSelector
+            tracks={pendingMkvData.tracks}
+            onSelect={handleMkvSubtitleSelect}
+            onCancel={() => setPendingMkvData(null)} />
+        )}
       </div>
     );
   }
@@ -449,7 +655,9 @@ export default function SubtitleAlignmentEditor() {
         selectedEvents={selectedEvents} lockSelected={lockSelected} unlockSelected={unlockSelected}
         showNumericInput={showNumericInput} setShowNumericInput={setShowNumericInput}
         showHelp={showHelp} setShowHelp={setShowHelp}
-        handleFileInput={handleFileInput} handleExport={handleExport} fileName={fileName} />
+        handleFileInput={handleFileInput} handleExport={handleExport} fileName={fileName}
+        gridLines={gridLines} setGridLines={setGridLines}
+        gridDensity={gridDensity} setGridDensity={setGridDensity} />
 
       {showNumericInput && (
         <NumericInput
@@ -485,7 +693,7 @@ export default function SubtitleAlignmentEditor() {
         {/* ── TIMELINE ── */}
         <div ref={timelineRef} style={{ flex: 1, overflow: 'hidden', position: 'relative' }} onWheel={handleWheel}>
           <div style={{ display: 'flex', flexDirection: 'column', height: '100%', overflow: 'auto' }}>
-            <Ruler scrollX={scrollX} pxPerSec={pxPerSec} timelineRef={timelineRef} />
+            <Ruler scrollX={scrollX} pxPerSec={pxPerSec} timelineRef={timelineRef} gridDensity={gridDensity} />
 
             <WaveformLane
               waveformData={waveformData} scrollX={scrollX} pxPerSec={pxPerSec}
@@ -513,7 +721,8 @@ export default function SubtitleAlignmentEditor() {
                     handleEventMouseDown={handleEventMouseDown}
                     handleTimelineClick={handleTimelineClick} playheadTime={playheadTime}
                     markers={markers} timelineRef={timelineRef}
-                    masterEventId={masterEventId} onContextMenu={handleEventContextMenu} />
+                    masterEventId={masterEventId} onContextMenu={handleEventContextMenu}
+                    gridLines={gridLines} gridDensity={gridDensity} />
                 </div>
               );
             })}

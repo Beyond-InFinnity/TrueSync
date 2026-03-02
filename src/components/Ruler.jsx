@@ -2,12 +2,12 @@ import { useCallback } from 'react';
 import { formatTimestamp } from '../assParser.js';
 import { HEADER_WIDTH, RULER_HEIGHT, THEME } from '../theme.js';
 
-export default function Ruler({ scrollX, pxPerSec, timelineRef }) {
+export default function Ruler({ scrollX, pxPerSec, timelineRef, gridDensity = 1 }) {
   const renderRuler = useCallback(() => {
     const viewWidth = timelineRef.current ? timelineRef.current.clientWidth - HEADER_WIDTH : 800;
     const viewStart = scrollX / pxPerSec;
     const viewEnd = viewStart + viewWidth / pxPerSec;
-    const minTickPx = 80;
+    const minTickPx = 80 / gridDensity;
     const rawInterval = minTickPx / pxPerSec;
     const intervals = [0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1, 2, 5, 10, 15, 30, 60];
     const interval = intervals.find((i) => i >= rawInterval) || 60;
@@ -25,7 +25,7 @@ export default function Ruler({ scrollX, pxPerSec, timelineRef }) {
       );
     }
     return ticks;
-  }, [scrollX, pxPerSec, timelineRef]);
+  }, [scrollX, pxPerSec, timelineRef, gridDensity]);
 
   return (
     <div style={{ display: 'flex', height: RULER_HEIGHT, minHeight: RULER_HEIGHT, borderBottom: `1px solid ${THEME.border}`, position: 'sticky', top: 0, zIndex: 10, background: THEME.bg }}>
