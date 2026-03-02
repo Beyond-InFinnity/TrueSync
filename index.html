@@ -1,0 +1,34 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Subtitle Alignment Editor — NERV Analytic</title>
+    <meta name="description" content="Precision subtitle-to-audio alignment tool for forced alignment pipeline development." />
+
+    <!-- Preconnect to font CDN -->
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <!-- Load fonts with display=swap to avoid FOIT -->
+    <link
+      href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap"
+      rel="stylesheet"
+    />
+
+    <style>
+      *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+      html, body, #root {
+        width: 100%; height: 100%;
+        overflow: hidden;
+        background: #0D1117;
+        color: #E6EDF3;
+      }
+      /* Prevent pull-to-refresh / overscroll on mobile */
+      body { overscroll-behavior: none; }
+    </style>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.jsx"></script>
+  </body>
+</html>
