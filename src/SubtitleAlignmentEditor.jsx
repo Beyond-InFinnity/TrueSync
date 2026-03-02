@@ -417,6 +417,16 @@ export default function SubtitleAlignmentEditor() {
     };
   }, [dragState, pxPerSec, pushHistory]);
 
+  // ── Track helpers ──
+  const getTrackLayers = useCallback((track) => {
+    const trackEvents = events.filter((ev) => ev._style === track.name);
+    return [...new Set(trackEvents.map((ev) => ev._layer))].sort((a, b) => a - b);
+  }, [events]);
+
+  const getTrackHeight = useCallback((track) => {
+    return Math.max(TRACK_HEIGHT, LAYER_SUB_HEIGHT * getTrackLayers(track).length + 16);
+  }, [getTrackLayers]);
+
   // ── Track drag ──
   useEffect(() => {
     if (!trackDragState) return;
@@ -506,16 +516,6 @@ export default function SubtitleAlignmentEditor() {
     const viewEnd = viewStart + viewWidth / pxPerSec;
     renderWaveform(ctx, waveformData, viewStart, viewEnd, pxPerSec, viewWidth, WAVEFORM_HEIGHT, THEME.waveform);
   }, [waveformData, scrollX, pxPerSec]);
-
-  // ── Track helpers ──
-  const getTrackLayers = useCallback((track) => {
-    const trackEvents = events.filter((ev) => ev._style === track.name);
-    return [...new Set(trackEvents.map((ev) => ev._layer))].sort((a, b) => a - b);
-  }, [events]);
-
-  const getTrackHeight = useCallback((track) => {
-    return Math.max(TRACK_HEIGHT, LAYER_SUB_HEIGHT * getTrackLayers(track).length + 16);
-  }, [getTrackLayers]);
 
   // ── Ruler ──
   const renderRuler = useCallback(() => {
