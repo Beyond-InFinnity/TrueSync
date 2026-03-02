@@ -1,52 +1,57 @@
 import { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import { parseASS, serializeASS, formatTimestamp } from './assParser.js';
-import { generateWaveformData, renderWaveform } from './waveform.js';
 import {
   TRACK_HEIGHT, LAYER_SUB_HEIGHT, HEADER_WIDTH, RULER_HEIGHT,
   WAVEFORM_HEIGHT, MIN_PX_PER_SEC, MAX_PX_PER_SEC, THEME
 } from './theme.js';
 
-// ══════════════════════════════════════════════════════════════════════════════
-// MAIN COMPONENT
-// ══════════════════════════════════════════════════════════════════════════════
+import { DEFAULT_HOTKEYS, matchesHotkey } from './hotkeys.js';
+import { extractSubtitleTracks, reassembleASS, srtToASS } from './mkvExtractor.js';
+import useHistory from './hooks/useHistory.js';
+import useAudio from './hooks/useAudio.js';
+import useDrag from './hooks/useDrag.js';
+
+import Toolbar from './components/Toolbar.jsx';
+import NumericInput from './components/NumericInput.jsx';
+import HotkeyEditor from './components/HotkeyEditor.jsx';
+import WaveformLane from './components/WaveformLane.jsx';
+import Ruler from './components/Ruler.jsx';
+import TrackHeader from './components/TrackHeader.jsx';
+import TrackLane from './components/TrackLane.jsx';
+import ContextMenu from './components/ContextMenu.jsx';
+import SubtitleTrackSelector from './components/SubtitleTrackSelector.jsx';
 
 export default function SubtitleAlignmentEditor() {
   const [assData, setAssData] = useState(null);
   const [events, setEvents] = useState([]);
   const [tracks, setTracks] = useState([]);
-  const [audioBuffer, setAudioBuffer] = useState(null);
-  const [waveformData, setWaveformData] = useState(null);
-  const [duration, setDuration] = useState(120);
-  const [pxPerSec, setPxPerSec] = useState(80);
-  const [scrollX, setScrollX] = useState(0);
-  const [playheadTime, setPlayheadTime] = useState(0);
-  const [isPlaying, setIsPlaying] = useState(false);
   const [markers, setMarkers] = useState([]);
   const [selectedEvents, setSelectedEvents] = useState(new Set());
   const [lockGroups, setLockGroups] = useState([]);
-  const [dragState, setDragState] = useState(null);
   const [showNumericInput, setShowNumericInput] = useState(false);
   const [numericValue, setNumericValue] = useState('');
   const [numericMode, setNumericMode] = useState('shift');
   const [showHelp, setShowHelp] = useState(false);
   const [fileName, setFileName] = useState('');
   const [videoUrl, setVideoUrl] = useState(null);
-
-  const timelineRef = useRef(null);
-  const waveformCanvasRef = useRef(null);
-  const audioContextRef = useRef(null);
-  const audioSourceRef = useRef(null);
-  const playStartRef = useRef(null);
-  const playOffsetRef = useRef(null);
-  const animFrameRef = useRef(null);
-  const videoRef = useRef(null);
-  const historyRef = useRef([]);
-  const historyIndexRef = useRef(-1);
-  const dragStartedRef = useRef(false);
-  const HISTORY_LIMIT = 50;
-
+  const [pxPerSec, setPxPerSec] = useState(80);
+  const [scrollX, setScrollX] = useState(0);
   const [trackOrder, setTrackOrder] = useState([]);
   const [trackDragState, setTrackDragState] = useState(null);
+
+  // Feature state
+  const [masterEventId, setMasterEventId] = useState(null);
+  const [contextMenu, setContextMenu] = useState(null);
+  const [pendingMkvData, setPendingMkvData] = useState(null);
+  const [hotkeys, setHotkeys] = useState(() => JSON.parse(JSON.stringify(DEFAULT_HOTKEYS)));
+  const [rebindingAction, setRebindingAction] = useState(null);
+
+  const timelineRef = useRef(null);
+  const videoRef = useRef(null);
+
+  // ── Hooks ──
+  const { pushHistory, undo, redo, initHistory } = useHistory(setEvents, setTracks);
+  const { audioBuffer, waveformData, duration, setDuration, isPlaying, playheadTime, setPlayheadTime, loadAudio, togglePlayback, stopPlayback } = useAudio(videoRef);
 
   // ── Derived state ──
   const visibleTracks = useMemo(() => {
@@ -59,215 +64,6 @@ export default function SubtitleAlignmentEditor() {
       return (ai === -1 ? Infinity : ai) - (bi === -1 ? Infinity : bi);
     });
   }, [tracks, trackOrder]);
-
-  // ── Audio context ──
-  const getAudioContext = useCallback(() => {
-    if (!audioContextRef.current) {
-      audioContextRef.current = new (window.AudioContext || window.webkitAudioContext)();
-    }
-    return audioContextRef.current;
-  }, []);
-
-  // ── Undo/Redo ──
-  const pushHistory = useCallback((eventsSnapshot) => {
-    const clone = eventsSnapshot.map(ev => ({ ...ev }));
-    const history = historyRef.current;
-    history.splice(historyIndexRef.current + 1);
-    history.push(clone);
-    if (history.length > HISTORY_LIMIT) {
-      history.splice(0, history.length - HISTORY_LIMIT);
-    }
-    historyIndexRef.current = history.length - 1;
-  }, []);
-
-  const undo = useCallback(() => {
-    if (historyIndexRef.current <= 0) return;
-    historyIndexRef.current -= 1;
-    setEvents(historyRef.current[historyIndexRef.current].map(ev => ({ ...ev })));
-  }, []);
-
-  const redo = useCallback(() => {
-    if (historyIndexRef.current >= historyRef.current.length - 1) return;
-    historyIndexRef.current += 1;
-    setEvents(historyRef.current[historyIndexRef.current].map(ev => ({ ...ev })));
-  }, []);
-
-  const loadAudio = useCallback(async (file) => {
-    const ctx = getAudioContext();
-    const arrayBuf = await file.arrayBuffer();
-    const decoded = await ctx.decodeAudioData(arrayBuf);
-    setAudioBuffer(decoded);
-    setDuration(decoded.duration);
-    setWaveformData(generateWaveformData(decoded, 256));
-  }, [getAudioContext]);
-
-  // ── Playback ──
-  const startPlayback = useCallback(() => {
-    if (!audioBuffer) return;
-    const ctx = getAudioContext();
-    if (ctx.state === 'suspended') ctx.resume();
-
-    const source = ctx.createBufferSource();
-    source.buffer = audioBuffer;
-    source.connect(ctx.destination);
-    source.start(0, playheadTime);
-    audioSourceRef.current = source;
-    playStartRef.current = ctx.currentTime;
-    playOffsetRef.current = playheadTime;
-    setIsPlaying(true);
-
-    source.onended = () => setIsPlaying(false);
-
-    const animate = () => {
-      const elapsed = ctx.currentTime - playStartRef.current;
-      const currentTime = playOffsetRef.current + elapsed;
-      setPlayheadTime(currentTime);
-      if (videoRef.current && Math.abs(videoRef.current.currentTime - currentTime) > 0.1) {
-        videoRef.current.currentTime = currentTime;
-      }
-      if (currentTime < duration) {
-        animFrameRef.current = requestAnimationFrame(animate);
-      }
-    };
-    animFrameRef.current = requestAnimationFrame(animate);
-  }, [audioBuffer, playheadTime, duration, getAudioContext]);
-
-  const stopPlayback = useCallback(() => {
-    if (audioSourceRef.current) {
-      try { audioSourceRef.current.stop(); } catch (e) {}
-      audioSourceRef.current = null;
-    }
-    if (animFrameRef.current) cancelAnimationFrame(animFrameRef.current);
-    setIsPlaying(false);
-  }, []);
-
-  const togglePlayback = useCallback(() => {
-    if (isPlaying) {
-      const ctx = getAudioContext();
-      const elapsed = ctx.currentTime - playStartRef.current;
-      setPlayheadTime(playOffsetRef.current + elapsed);
-      stopPlayback();
-    } else {
-      startPlayback();
-    }
-  }, [isPlaying, startPlayback, stopPlayback, getAudioContext]);
-
-  // ── File loading ──
-  const handleASSFile = useCallback((file) => {
-    setFileName(file.name);
-    const reader = new FileReader();
-    reader.onload = (e) => {
-      const parsed = parseASS(e.target.result);
-      setAssData(parsed);
-      const initialEvents = [...parsed.events];
-      setEvents(initialEvents);
-      setTracks([...parsed.tracks]);
-      setTrackOrder(parsed.tracks.map(t => t.name));
-      historyRef.current = [initialEvents.map(ev => ({ ...ev }))];
-      historyIndexRef.current = 0;
-      if (parsed.events.length > 0) {
-        const maxEnd = Math.max(...parsed.events.map((ev) => ev._end));
-        setDuration((d) => Math.max(d, maxEnd + 10));
-      }
-    };
-    reader.readAsText(file);
-  }, []);
-
-  const handleAudioFile = useCallback((file) => loadAudio(file), [loadAudio]);
-
-  const handleVideoFile = useCallback((file) => {
-    setVideoUrl(URL.createObjectURL(file));
-    loadAudio(file);
-  }, [loadAudio]);
-
-  const routeFile = useCallback((file) => {
-    const ext = file.name.split('.').pop().toLowerCase();
-    if (ext === 'ass' || ext === 'ssa') handleASSFile(file);
-    else if (['wav', 'mp3', 'ogg', 'flac', 'm4a'].includes(ext)) handleAudioFile(file);
-    else if (['mp4', 'mkv', 'webm'].includes(ext)) handleVideoFile(file);
-  }, [handleASSFile, handleAudioFile, handleVideoFile]);
-
-  const handleFileDrop = useCallback((e) => {
-    e.preventDefault();
-    for (const file of e.dataTransfer.files) routeFile(file);
-  }, [routeFile]);
-
-  const handleFileInput = useCallback((e) => {
-    for (const file of e.target.files) routeFile(file);
-  }, [routeFile]);
-
-  // ── Export ──
-  const handleExport = useCallback(() => {
-    if (!assData) return;
-    const output = serializeASS(assData, events);
-    const blob = new Blob([output], { type: 'text/plain;charset=utf-8' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = fileName || 'output.ass';
-    a.click();
-    URL.revokeObjectURL(url);
-  }, [assData, events, fileName]);
-
-  // ── Zoom & scroll ──
-  const handleWheel = useCallback((e) => {
-    if (e.ctrlKey || e.metaKey) {
-      e.preventDefault();
-      const rect = timelineRef.current?.getBoundingClientRect();
-      if (!rect) return;
-      const mouseX = e.clientX - rect.left - HEADER_WIDTH + scrollX;
-      const timeAtMouse = mouseX / pxPerSec;
-      const factor = e.deltaY < 0 ? 1.15 : 1 / 1.15;
-      const newPxPerSec = Math.max(MIN_PX_PER_SEC, Math.min(MAX_PX_PER_SEC, pxPerSec * factor));
-      setPxPerSec(newPxPerSec);
-      setScrollX(Math.max(0, timeAtMouse * newPxPerSec - (e.clientX - rect.left - HEADER_WIDTH)));
-    } else {
-      setScrollX((s) => Math.max(0, s + e.deltaX + e.deltaY));
-    }
-  }, [pxPerSec, scrollX]);
-
-  // ── Keyboard shortcuts ──
-  useEffect(() => {
-    const handler = (e) => {
-      const ctrlOrCmd = e.ctrlKey || e.metaKey;
-      if (ctrlOrCmd && e.code === 'KeyZ' && !showNumericInput) {
-        e.preventDefault();
-        if (e.shiftKey) redo();
-        else undo();
-        return;
-      }
-      if (e.code === 'Space' && !showNumericInput) {
-        e.preventDefault();
-        togglePlayback();
-      }
-      if (e.code === 'KeyM' && !showNumericInput) {
-        setMarkers((m) => [...m, { time: playheadTime, id: Date.now() }]);
-      }
-      if ((e.code === 'Delete' || e.code === 'Backspace') && !showNumericInput) {
-        setSelectedEvents(new Set());
-      }
-      if (e.code === 'KeyN' && !showNumericInput) {
-        setShowNumericInput(true);
-      }
-      if (e.code === 'Escape') {
-        setShowNumericInput(false);
-        setSelectedEvents(new Set());
-      }
-      if ((e.code === 'ArrowLeft' || e.code === 'ArrowRight') && selectedEvents.size > 0 && !showNumericInput) {
-        e.preventDefault();
-        const delta = (e.code === 'ArrowLeft' ? -1 : 1) * (e.shiftKey ? 0.1 : 0.01);
-        setEvents((evts) => {
-          pushHistory(evts);
-          return evts.map((ev) => {
-            if (!selectedEvents.has(ev._id)) return ev;
-            return { ...ev, _start: ev._start + delta, _end: ev._end + delta };
-          });
-        });
-      }
-    };
-    window.addEventListener('keydown', handler);
-    return () => window.removeEventListener('keydown', handler);
-  }, [togglePlayback, playheadTime, selectedEvents, showNumericInput, undo, redo, pushHistory]);
 
   // ── Lock groups ──
   const getLockGroup = useCallback((eventId) => lockGroups.find((g) => g.has(eventId)), [lockGroups]);
@@ -303,119 +99,22 @@ export default function SubtitleAlignmentEditor() {
     );
   }, [selectedEvents]);
 
+  // ── Drag hook ──
+  const { dragState, handleEventMouseDown } = useDrag({
+    events, selectedEvents, setSelectedEvents, setEvents, pxPerSec,
+    getAffectedEvents, pushHistory, trackOrder, visibleTracks, tracks,
+  });
+
   // ── Track controls ──
   const toggleTrackMute = useCallback((name) => {
+    pushHistory(events, tracks);
     setTracks((ts) => ts.map((t) => (t.name === name ? { ...t, muted: !t.muted } : t)));
-  }, []);
+  }, [events, tracks, pushHistory]);
 
   const toggleTrackSolo = useCallback((name) => {
+    pushHistory(events, tracks);
     setTracks((ts) => ts.map((t) => (t.name === name ? { ...t, solo: !t.solo } : t)));
-  }, []);
-
-  // ── Event drag ──
-  const handleEventMouseDown = useCallback((e, eventId, mode) => {
-    e.stopPropagation();
-    const ctrlOrCmd = e.ctrlKey || e.metaKey;
-    const ev = events.find((ev) => ev._id === eventId);
-    if (!ev) return;
-
-    // Ctrl/Cmd+click: toggle in selection, no drag
-    if (ctrlOrCmd) {
-      setSelectedEvents((s) => {
-        const ns = new Set(s);
-        ns.has(eventId) ? ns.delete(eventId) : ns.add(eventId);
-        return ns;
-      });
-      return;
-    }
-
-    // Shift+click: range select, no drag
-    if (e.shiftKey) {
-      setSelectedEvents((prev) => {
-        const allIds = [...prev, eventId];
-        const allEvts = allIds.map(id => events.find(ev => ev._id === id)).filter(Boolean);
-        const rangeStart = Math.min(...allEvts.map(ev => ev._start));
-        const rangeEnd = Math.max(...allEvts.map(ev => ev._end));
-        const trackNames = [...new Set(allEvts.map(ev => ev._style))];
-        const trackIndices = trackNames.map(n => trackOrder.indexOf(n)).filter(i => i !== -1);
-        const minTrack = Math.min(...trackIndices);
-        const maxTrack = Math.max(...trackIndices);
-        const tracksInRange = trackOrder.slice(minTrack, maxTrack + 1);
-        const visTrackNames = new Set(visibleTracks.map(t => t.name));
-        const ns = new Set();
-        for (const evt of events) {
-          if (!visTrackNames.has(evt._style)) continue;
-          if (!tracksInRange.includes(evt._style)) continue;
-          if (evt._end > rangeStart && evt._start < rangeEnd) {
-            ns.add(evt._id);
-          }
-        }
-        return ns;
-      });
-      return;
-    }
-
-    // Build snapshots map for all participating events
-    let pendingSelectId = null;
-    let activeSelection = selectedEvents;
-    if (!selectedEvents.has(eventId)) {
-      activeSelection = new Set([eventId]);
-      setSelectedEvents(activeSelection);
-    } else {
-      pendingSelectId = eventId;
-    }
-
-    const affected = getAffectedEvents(eventId);
-    const participants = new Set([...activeSelection, ...affected]);
-    const snapshots = {};
-    for (const id of participants) {
-      const evt = events.find(e => e._id === id);
-      if (evt) snapshots[id] = { origStart: evt._start, origEnd: evt._end };
-    }
-    const preEditSnapshot = events.map(ev => ({ ...ev }));
-    dragStartedRef.current = false;
-    setDragState({ mode, eventId, startX: e.clientX, snapshots, preEditSnapshot, pendingSelectId });
-  }, [events, selectedEvents, getAffectedEvents, trackOrder, visibleTracks]);
-
-  useEffect(() => {
-    if (!dragState) return;
-    const handleMouseMove = (e) => {
-      if (!dragStartedRef.current) {
-        if (Math.abs(e.clientX - dragState.startX) < 4) return;
-        dragStartedRef.current = true;
-      }
-      const deltaTime = (e.clientX - dragState.startX) / pxPerSec;
-      setEvents((evts) => evts.map((ev) => {
-        const snapshot = dragState.snapshots[ev._id];
-        if (!snapshot) return ev;
-        if (dragState.mode === 'move') {
-          return { ...ev, _start: snapshot.origStart + deltaTime, _end: snapshot.origEnd + deltaTime };
-        }
-        if (dragState.mode === 'resizeStart' && ev._id === dragState.eventId) {
-          return { ...ev, _start: Math.min(snapshot.origStart + deltaTime, snapshot.origEnd - 0.01) };
-        }
-        if (dragState.mode === 'resizeEnd' && ev._id === dragState.eventId) {
-          return { ...ev, _end: Math.max(snapshot.origEnd + deltaTime, snapshot.origStart + 0.01) };
-        }
-        return ev;
-      }));
-    };
-    const handleMouseUp = () => {
-      if (dragStartedRef.current && dragState.preEditSnapshot) {
-        pushHistory(dragState.preEditSnapshot);
-      }
-      if (!dragStartedRef.current && dragState.pendingSelectId) {
-        setSelectedEvents(new Set([dragState.pendingSelectId]));
-      }
-      setDragState(null);
-    };
-    window.addEventListener('mousemove', handleMouseMove);
-    window.addEventListener('mouseup', handleMouseUp);
-    return () => {
-      window.removeEventListener('mousemove', handleMouseMove);
-      window.removeEventListener('mouseup', handleMouseUp);
-    };
-  }, [dragState, pxPerSec, pushHistory]);
+  }, [events, tracks, pushHistory]);
 
   // ── Track helpers ──
   const getTrackLayers = useCallback((track) => {
@@ -426,6 +125,176 @@ export default function SubtitleAlignmentEditor() {
   const getTrackHeight = useCallback((track) => {
     return Math.max(TRACK_HEIGHT, LAYER_SUB_HEIGHT * getTrackLayers(track).length + 16);
   }, [getTrackLayers]);
+
+  // ── File loading ──
+  const handleASSFile = useCallback((file) => {
+    setFileName(file.name);
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      const parsed = parseASS(e.target.result);
+      setAssData(parsed);
+      const initialEvents = [...parsed.events];
+      setEvents(initialEvents);
+      setTracks([...parsed.tracks]);
+      setTrackOrder(parsed.tracks.map(t => t.name));
+      initHistory(initialEvents, [...parsed.tracks]);
+      if (parsed.events.length > 0) {
+        const maxEnd = Math.max(...parsed.events.map((ev) => ev._end));
+        setDuration((d) => Math.max(d, maxEnd + 10));
+      }
+    };
+    reader.readAsText(file);
+  }, [initHistory, setDuration]);
+
+  const handleAudioFile = useCallback((file) => loadAudio(file), [loadAudio]);
+
+  const handleVideoFile = useCallback(async (file) => {
+    setVideoUrl(URL.createObjectURL(file));
+    loadAudio(file);
+    // Attempt MKV subtitle extraction
+    try {
+      const arrayBuf = await file.arrayBuffer();
+      const result = extractSubtitleTracks(arrayBuf);
+      if (result.tracks.length > 0) {
+        setPendingMkvData(result);
+      }
+    } catch (e) {
+      // Silently ignore extraction failures — video/audio still loaded
+    }
+  }, [loadAudio]);
+
+  const routeFile = useCallback((file) => {
+    const ext = file.name.split('.').pop().toLowerCase();
+    if (ext === 'ass' || ext === 'ssa') handleASSFile(file);
+    else if (['wav', 'mp3', 'ogg', 'flac', 'm4a'].includes(ext)) handleAudioFile(file);
+    else if (['mp4', 'mkv', 'webm'].includes(ext)) handleVideoFile(file);
+  }, [handleASSFile, handleAudioFile, handleVideoFile]);
+
+  const handleFileDrop = useCallback((e) => {
+    e.preventDefault();
+    for (const file of e.dataTransfer.files) routeFile(file);
+  }, [routeFile]);
+
+  const handleFileInput = useCallback((e) => {
+    for (const file of e.target.files) routeFile(file);
+  }, [routeFile]);
+
+  // ── Export ──
+  const handleExport = useCallback(() => {
+    if (!assData) return;
+    const output = serializeASS(assData, events);
+    const blob = new Blob([output], { type: 'text/plain;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = fileName || 'output.ass';
+    a.click();
+    URL.revokeObjectURL(url);
+  }, [assData, events, fileName]);
+
+  // ── MKV subtitle selection ──
+  const handleMkvSubtitleSelect = useCallback((trackIndex) => {
+    if (!pendingMkvData) return;
+    const trackMeta = pendingMkvData.tracks.find(t => t.index === trackIndex);
+    const subs = pendingMkvData.subtitles[trackIndex];
+    if (!trackMeta || !subs) { setPendingMkvData(null); return; }
+
+    let assString;
+    if (trackMeta.codecId === 'S_TEXT/ASS' || trackMeta.codecId === 'S_TEXT/SSA') {
+      assString = reassembleASS(trackMeta.codecPrivate, subs);
+    } else {
+      assString = srtToASS(subs);
+    }
+
+    const parsed = parseASS(assString);
+    setAssData(parsed);
+    const initialEvents = [...parsed.events];
+    setEvents(initialEvents);
+    setTracks([...parsed.tracks]);
+    setTrackOrder(parsed.tracks.map(t => t.name));
+    initHistory(initialEvents, [...parsed.tracks]);
+    if (parsed.events.length > 0) {
+      const maxEnd = Math.max(...parsed.events.map((ev) => ev._end));
+      setDuration((d) => Math.max(d, maxEnd + 10));
+    }
+    setFileName('embedded.ass');
+    setPendingMkvData(null);
+  }, [pendingMkvData, initHistory, setDuration]);
+
+  // ── Zoom & scroll ──
+  const handleWheel = useCallback((e) => {
+    if (e.ctrlKey || e.metaKey) {
+      e.preventDefault();
+      const rect = timelineRef.current?.getBoundingClientRect();
+      if (!rect) return;
+      const mouseX = e.clientX - rect.left - HEADER_WIDTH + scrollX;
+      const timeAtMouse = mouseX / pxPerSec;
+      const factor = e.deltaY < 0 ? 1.15 : 1 / 1.15;
+      const newPxPerSec = Math.max(MIN_PX_PER_SEC, Math.min(MAX_PX_PER_SEC, pxPerSec * factor));
+      setPxPerSec(newPxPerSec);
+      setScrollX(Math.max(0, timeAtMouse * newPxPerSec - (e.clientX - rect.left - HEADER_WIDTH)));
+    } else {
+      setScrollX((s) => Math.max(0, s + e.deltaX + e.deltaY));
+    }
+  }, [pxPerSec, scrollX]);
+
+  // ── Keyboard shortcuts (data-driven via hotkeys state) ──
+  useEffect(() => {
+    const handler = (e) => {
+      if (showNumericInput && e.code !== 'Escape') return;
+
+      const actions = {
+        undo:           () => { e.preventDefault(); undo(); },
+        redo:           () => { e.preventDefault(); redo(); },
+        togglePlayback: () => { e.preventDefault(); togglePlayback(); },
+        addMarker:      () => { setMarkers((m) => [...m, { time: playheadTime, id: Date.now() }]); },
+        toggleNumeric:  () => { setShowNumericInput(true); },
+        deselect:       () => { setSelectedEvents(new Set()); },
+        clearSelection: () => { setShowNumericInput(false); setSelectedEvents(new Set()); setContextMenu(null); },
+        nudgeLeft:      () => {
+          if (selectedEvents.size === 0) return;
+          e.preventDefault();
+          setEvents((evts) => {
+            pushHistory(evts, tracks);
+            return evts.map((ev) => selectedEvents.has(ev._id) ? { ...ev, _start: ev._start - 0.01, _end: ev._end - 0.01 } : ev);
+          });
+        },
+        nudgeRight:     () => {
+          if (selectedEvents.size === 0) return;
+          e.preventDefault();
+          setEvents((evts) => {
+            pushHistory(evts, tracks);
+            return evts.map((ev) => selectedEvents.has(ev._id) ? { ...ev, _start: ev._start + 0.01, _end: ev._end + 0.01 } : ev);
+          });
+        },
+        nudgeLeftBig:   () => {
+          if (selectedEvents.size === 0) return;
+          e.preventDefault();
+          setEvents((evts) => {
+            pushHistory(evts, tracks);
+            return evts.map((ev) => selectedEvents.has(ev._id) ? { ...ev, _start: ev._start - 0.1, _end: ev._end - 0.1 } : ev);
+          });
+        },
+        nudgeRightBig:  () => {
+          if (selectedEvents.size === 0) return;
+          e.preventDefault();
+          setEvents((evts) => {
+            pushHistory(evts, tracks);
+            return evts.map((ev) => selectedEvents.has(ev._id) ? { ...ev, _start: ev._start + 0.1, _end: ev._end + 0.1 } : ev);
+          });
+        },
+      };
+
+      for (const [action, binding] of Object.entries(hotkeys)) {
+        if (matchesHotkey(e, binding) && actions[action]) {
+          actions[action]();
+          return;
+        }
+      }
+    };
+    window.addEventListener('keydown', handler);
+    return () => window.removeEventListener('keydown', handler);
+  }, [togglePlayback, playheadTime, selectedEvents, showNumericInput, undo, redo, pushHistory, tracks, hotkeys]);
 
   // ── Track drag ──
   useEffect(() => {
@@ -483,7 +352,7 @@ export default function SubtitleAlignmentEditor() {
     setPlayheadTime(time);
     if (videoRef.current) videoRef.current.currentTime = time;
     setSelectedEvents(new Set());
-  }, [pxPerSec, scrollX, dragState]);
+  }, [pxPerSec, scrollX, dragState, setPlayheadTime]);
 
   // ── Numeric edit ──
   const applyNumericEdit = useCallback(() => {
@@ -491,7 +360,7 @@ export default function SubtitleAlignmentEditor() {
     if (isNaN(ms)) return;
     const delta = ms / 1000;
     setEvents((evts) => {
-      pushHistory(evts);
+      pushHistory(evts, tracks);
       return evts.map((ev) => {
         if (!selectedEvents.has(ev._id)) return ev;
         if (numericMode === 'shift') return { ...ev, _start: ev._start + delta, _end: ev._end + delta };
@@ -502,45 +371,46 @@ export default function SubtitleAlignmentEditor() {
     });
     setShowNumericInput(false);
     setNumericValue('');
-  }, [numericValue, numericMode, selectedEvents, pushHistory]);
+  }, [numericValue, numericMode, selectedEvents, pushHistory, tracks]);
 
-  // ── Waveform canvas rendering ──
-  useEffect(() => {
-    if (!waveformData || !waveformCanvasRef.current || !timelineRef.current) return;
-    const canvas = waveformCanvasRef.current;
-    const viewWidth = timelineRef.current.clientWidth - HEADER_WIDTH;
-    canvas.width = viewWidth;
-    canvas.height = WAVEFORM_HEIGHT;
-    const ctx = canvas.getContext('2d');
-    const viewStart = scrollX / pxPerSec;
-    const viewEnd = viewStart + viewWidth / pxPerSec;
-    renderWaveform(ctx, waveformData, viewStart, viewEnd, pxPerSec, viewWidth, WAVEFORM_HEIGHT, THEME.waveform);
-  }, [waveformData, scrollX, pxPerSec]);
+  // ── Context menu / master block ──
+  const handleEventContextMenu = useCallback((e, eventId) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setContextMenu({ x: e.clientX, y: e.clientY, eventId });
+  }, []);
 
-  // ── Ruler ──
-  const renderRuler = useCallback(() => {
-    const viewWidth = timelineRef.current ? timelineRef.current.clientWidth - HEADER_WIDTH : 800;
-    const viewStart = scrollX / pxPerSec;
-    const viewEnd = viewStart + viewWidth / pxPerSec;
-    const minTickPx = 80;
-    const rawInterval = minTickPx / pxPerSec;
-    const intervals = [0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1, 2, 5, 10, 15, 30, 60];
-    const interval = intervals.find((i) => i >= rawInterval) || 60;
-    const ticks = [];
-    const start = Math.floor(viewStart / interval) * interval;
-    for (let t = start; t <= viewEnd; t += interval) {
-      const x = t * pxPerSec - scrollX;
-      if (x < 0) continue;
-      const isMajor = Math.abs(t % (interval * 5)) < 0.001 || interval >= 5;
-      ticks.push(
-        <g key={t.toFixed(4)}>
-          <line x1={x} y1={isMajor ? 2 : 14} x2={x} y2={RULER_HEIGHT} stroke={isMajor ? THEME.textDim : THEME.textMuted} strokeWidth={isMajor ? 1 : 0.5} />
-          {isMajor && <text x={x + 4} y={12} fill={THEME.textDim} fontSize="10" fontFamily="'JetBrains Mono', monospace">{formatTimestamp(t)}</text>}
-        </g>
-      );
-    }
-    return ticks;
-  }, [scrollX, pxPerSec]);
+  const setMasterEvent = useCallback((eventId) => {
+    setMasterEventId(eventId);
+  }, []);
+
+  const alignToMaster = useCallback((eventId) => {
+    if (masterEventId == null) return;
+    const master = events.find(ev => ev._id === masterEventId);
+    const target = events.find(ev => ev._id === eventId);
+    if (!master || !target) return;
+    pushHistory(events, tracks);
+    const delta = master._start - target._start;
+    setEvents(evts => evts.map(ev =>
+      ev._id === eventId ? { ...ev, _start: ev._start + delta, _end: ev._end + delta } : ev
+    ));
+  }, [masterEventId, events, tracks, pushHistory]);
+
+  const matchMasterDuration = useCallback((eventId) => {
+    if (masterEventId == null) return;
+    const master = events.find(ev => ev._id === masterEventId);
+    const target = events.find(ev => ev._id === eventId);
+    if (!master || !target) return;
+    pushHistory(events, tracks);
+    const masterDuration = master._end - master._start;
+    setEvents(evts => evts.map(ev =>
+      ev._id === eventId ? { ...ev, _end: ev._start + masterDuration } : ev
+    ));
+  }, [masterEventId, events, tracks, pushHistory]);
+
+  const clearMaster = useCallback(() => {
+    setMasterEventId(null);
+  }, []);
 
   // ══════════════════════════════════════════════════════════════════════════
   // RENDER — Drop zone
@@ -573,87 +443,38 @@ export default function SubtitleAlignmentEditor() {
     <div style={{ background: THEME.bg, color: THEME.text, width: '100vw', height: '100vh', display: 'flex', flexDirection: 'column', fontFamily: "'DM Sans', system-ui, sans-serif", overflow: 'hidden', userSelect: 'none' }}
       onDragOver={(e) => e.preventDefault()} onDrop={handleFileDrop}>
 
-      {/* ── TOOLBAR ── */}
-      <div style={{ height: 48, minHeight: 48, background: THEME.surface, borderBottom: `1px solid ${THEME.border}`, display: 'flex', alignItems: 'center', padding: '0 16px', gap: 8 }}>
-        <span style={{ fontWeight: 700, fontSize: 14, letterSpacing: '-0.02em' }}>⟐ SAE</span>
-        <span style={{ color: THEME.textDim, fontSize: 12, marginRight: 16, fontFamily: "'JetBrains Mono', monospace" }}>{fileName}</span>
+      <Toolbar
+        isPlaying={isPlaying} togglePlayback={togglePlayback} setPlayheadTime={setPlayheadTime}
+        videoRef={videoRef} playheadTime={playheadTime} setMarkers={setMarkers}
+        selectedEvents={selectedEvents} lockSelected={lockSelected} unlockSelected={unlockSelected}
+        showNumericInput={showNumericInput} setShowNumericInput={setShowNumericInput}
+        showHelp={showHelp} setShowHelp={setShowHelp}
+        handleFileInput={handleFileInput} handleExport={handleExport} fileName={fileName} />
 
-        <div style={{ display: 'flex', gap: 4 }}>
-          <ToolbarBtn onClick={togglePlayback} title="Space">{isPlaying ? '⏸' : '▶'}</ToolbarBtn>
-          <ToolbarBtn onClick={() => { setPlayheadTime(0); if (videoRef.current) videoRef.current.currentTime = 0; }} title="Return to start">⏮</ToolbarBtn>
-        </div>
-
-        <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 13, color: THEME.accent, minWidth: 100 }}>
-          {formatTimestamp(playheadTime)}
-        </span>
-
-        <div style={{ flex: 1 }} />
-
-        <ToolbarBtn onClick={() => setMarkers((m) => [...m, { time: playheadTime, id: Date.now() }])} title="Add marker (M)">📍</ToolbarBtn>
-        <ToolbarBtn onClick={lockSelected} disabled={selectedEvents.size < 2} title="Lock selected">🔗</ToolbarBtn>
-        <ToolbarBtn onClick={unlockSelected} title="Unlock selected">🔓</ToolbarBtn>
-        <ToolbarBtn onClick={() => setShowNumericInput(!showNumericInput)} title="Numeric edit (N)">#±</ToolbarBtn>
-        <ToolbarBtn onClick={() => setShowHelp(!showHelp)} title="Help">?</ToolbarBtn>
-
-        <div style={{ width: 1, height: 24, background: THEME.border, margin: '0 4px' }} />
-
-        <label style={{ padding: '4px 12px', background: THEME.surfaceLight, borderRadius: 6, fontSize: 12, cursor: 'pointer', border: `1px solid ${THEME.border}` }}>
-          + Load
-          <input type="file" multiple accept=".ass,.ssa,.wav,.mp3,.ogg,.flac,.m4a,.mp4,.mkv,.webm" onChange={handleFileInput} style={{ display: 'none' }} />
-        </label>
-
-        <button onClick={handleExport} style={{ padding: '4px 16px', background: THEME.accent, color: '#000', border: 'none', borderRadius: 6, fontWeight: 600, fontSize: 12, cursor: 'pointer' }}>
-          Export .ass
-        </button>
-      </div>
-
-      {/* ── NUMERIC INPUT ── */}
       {showNumericInput && (
-        <div style={{ height: 40, minHeight: 40, background: THEME.surfaceLight, borderBottom: `1px solid ${THEME.border}`, display: 'flex', alignItems: 'center', padding: '0 16px', gap: 8, fontSize: 12 }}>
-          <select value={numericMode} onChange={(e) => setNumericMode(e.target.value)}
-            style={{ background: THEME.surface, color: THEME.text, border: `1px solid ${THEME.border}`, borderRadius: 4, padding: '2px 8px', fontSize: 12 }}>
-            <option value="shift">Shift</option>
-            <option value="extendStart">Extend Start</option>
-            <option value="extendEnd">Extend End</option>
-          </select>
-          <input type="text" value={numericValue} onChange={(e) => setNumericValue(e.target.value)}
-            onKeyDown={(e) => e.key === 'Enter' && applyNumericEdit()} placeholder="ms (negative = earlier)" autoFocus
-            style={{ background: THEME.surface, color: THEME.text, border: `1px solid ${THEME.border}`, borderRadius: 4, padding: '2px 8px', width: 160, fontSize: 12, fontFamily: "'JetBrains Mono', monospace" }} />
-          <button onClick={applyNumericEdit} style={{ padding: '2px 12px', background: THEME.accent, color: '#000', border: 'none', borderRadius: 4, fontSize: 12, fontWeight: 600, cursor: 'pointer' }}>Apply</button>
-          <span style={{ color: THEME.textDim }}>({selectedEvents.size} event{selectedEvents.size !== 1 ? 's' : ''} selected)</span>
-        </div>
+        <NumericInput
+          numericMode={numericMode} setNumericMode={setNumericMode}
+          numericValue={numericValue} setNumericValue={setNumericValue}
+          applyNumericEdit={applyNumericEdit} selectedEvents={selectedEvents} />
       )}
 
-      {/* ── HELP OVERLAY ── */}
-      {showHelp && (
-        <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.7)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 100 }}
-          onClick={() => setShowHelp(false)}>
-          <div style={{ background: THEME.surface, border: `1px solid ${THEME.border}`, borderRadius: 12, padding: 32, maxWidth: 480, fontSize: 13, lineHeight: 1.8 }}
-            onClick={(e) => e.stopPropagation()}>
-            <h2 style={{ margin: '0 0 16px', fontSize: 18 }}>Keyboard Shortcuts</h2>
-            <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 12 }}>
-              {[
-                ['Space', 'Play / Pause'], ['M', 'Add marker at playhead'], ['N', 'Toggle numeric input'],
-                ['Ctrl+Z', 'Undo'], ['Ctrl+Shift+Z', 'Redo'],
-                ['← →', 'Nudge selected ±10ms'], ['Shift + ← →', 'Nudge selected ±100ms'],
-                ['Ctrl + Scroll', 'Zoom timeline'], ['Scroll', 'Pan timeline'],
-                ['Click event', 'Select (deselects others)'], ['Ctrl + Click', 'Toggle event in selection'],
-                ['Shift + Click', 'Range select (time + track)'],
-                ['Drag event', 'Move event'], ['Drag edge', 'Resize event'], ['Esc', 'Clear selection / close panels'],
-              ].map(([key, desc]) => (
-                <div key={key} style={{ display: 'flex', gap: 16, padding: '2px 0' }}>
-                  <span style={{ color: THEME.accent, minWidth: 140 }}>{key}</span>
-                  <span style={{ color: THEME.textDim }}>{desc}</span>
-                </div>
-              ))}
-            </div>
-          </div>
-        </div>
+      <HotkeyEditor showHelp={showHelp} setShowHelp={setShowHelp}
+        hotkeys={hotkeys} setHotkeys={setHotkeys}
+        rebindingAction={rebindingAction} setRebindingAction={setRebindingAction} />
+      <ContextMenu contextMenu={contextMenu} onClose={() => setContextMenu(null)}
+        masterEventId={masterEventId} onSetMaster={setMasterEvent}
+        onAlignToMaster={alignToMaster} onMatchMasterDuration={matchMasterDuration}
+        onClearMaster={clearMaster} />
+
+      {pendingMkvData && (
+        <SubtitleTrackSelector
+          tracks={pendingMkvData.tracks}
+          onSelect={handleMkvSubtitleSelect}
+          onCancel={() => setPendingMkvData(null)} />
       )}
 
       {/* ── MAIN AREA ── */}
       <div style={{ display: 'flex', flex: 1, overflow: 'hidden' }}>
-        {/* Video preview */}
         {videoUrl && (
           <div style={{ width: 320, minWidth: 320, background: '#000', borderRight: `1px solid ${THEME.border}`, display: 'flex', flexDirection: 'column' }}>
             <div style={{ padding: '6px 12px', fontSize: 11, color: THEME.textDim, background: THEME.surface, borderBottom: `1px solid ${THEME.border}` }}>Preview</div>
@@ -664,104 +485,35 @@ export default function SubtitleAlignmentEditor() {
         {/* ── TIMELINE ── */}
         <div ref={timelineRef} style={{ flex: 1, overflow: 'hidden', position: 'relative' }} onWheel={handleWheel}>
           <div style={{ display: 'flex', flexDirection: 'column', height: '100%', overflow: 'auto' }}>
+            <Ruler scrollX={scrollX} pxPerSec={pxPerSec} timelineRef={timelineRef} />
 
-            {/* Ruler */}
-            <div style={{ display: 'flex', height: RULER_HEIGHT, minHeight: RULER_HEIGHT, borderBottom: `1px solid ${THEME.border}`, position: 'sticky', top: 0, zIndex: 10, background: THEME.bg }}>
-              <div style={{ width: HEADER_WIDTH, minWidth: HEADER_WIDTH, background: THEME.surface, borderRight: `1px solid ${THEME.border}`, display: 'flex', alignItems: 'center', padding: '0 12px', fontSize: 10, color: THEME.textDim, fontFamily: "'JetBrains Mono', monospace" }}>
-                {Math.round(pxPerSec)}px/s
-              </div>
-              <div style={{ flex: 1, position: 'relative', overflow: 'hidden' }}>
-                <svg width="100%" height={RULER_HEIGHT} style={{ position: 'absolute' }}>{renderRuler()}</svg>
-              </div>
-            </div>
-
-            {/* Waveform */}
-            {waveformData && (
-              <div style={{ display: 'flex', height: WAVEFORM_HEIGHT, minHeight: WAVEFORM_HEIGHT, borderBottom: `1px solid ${THEME.border}`, position: 'sticky', top: RULER_HEIGHT, zIndex: 9, background: THEME.waveformBg }}>
-                <div style={{ width: HEADER_WIDTH, minWidth: HEADER_WIDTH, background: THEME.surface, borderRight: `1px solid ${THEME.border}`, display: 'flex', alignItems: 'center', padding: '0 12px', fontSize: 11, fontWeight: 600, color: THEME.waveform }}>
-                  🔊 Audio
-                </div>
-                <div style={{ flex: 1, position: 'relative', overflow: 'hidden', cursor: 'pointer' }} onClick={handleTimelineClick}>
-                  <canvas ref={waveformCanvasRef} style={{ position: 'absolute', left: 0, top: 0, pointerEvents: 'none' }} />
-                  <div style={{ position: 'absolute', left: playheadTime * pxPerSec - scrollX, top: 0, width: 1, height: WAVEFORM_HEIGHT, background: THEME.playhead, pointerEvents: 'none', zIndex: 5 }} />
-                </div>
-              </div>
-            )}
+            <WaveformLane
+              waveformData={waveformData} scrollX={scrollX} pxPerSec={pxPerSec}
+              handleTimelineClick={handleTimelineClick} playheadTime={playheadTime}
+              timelineRef={timelineRef} />
 
             {/* Track lanes */}
             {visibleTracks.map((track) => {
               const layers = getTrackLayers(track);
               const trackH = getTrackHeight(track);
               const trackEvents = events.filter((ev) => ev._style === track.name);
-
               const isDraggingTrack = trackDragState?.draggedTrack === track.name;
+
               return (
                 <div key={track.name} style={{ display: 'flex', height: trackH, minHeight: trackH, borderBottom: `1px solid ${THEME.border}`, opacity: isDraggingTrack ? 0.6 : 1, cursor: isDraggingTrack ? 'grabbing' : undefined }}>
-                  {/* Header */}
-                  <div style={{ width: HEADER_WIDTH, minWidth: HEADER_WIDTH, background: THEME.surface, borderRight: `1px solid ${THEME.border}`, padding: '8px 12px', display: 'flex', flexDirection: 'column', justifyContent: 'space-between' }}>
-                    <div>
-                      <div style={{ fontSize: 12, fontWeight: 600, display: 'flex', alignItems: 'center', gap: 6 }}>
-                        <span style={{ cursor: 'grab', color: THEME.textDim, fontSize: 14, lineHeight: 1, userSelect: 'none' }}
-                          onMouseDown={(e) => { e.stopPropagation(); setTrackDragState({ draggedTrack: track.name, startY: e.clientY, currentY: e.clientY }); }}>⠿</span>
-                        <div style={{ width: 10, height: 10, borderRadius: 2, background: track.color }} />
-                        {track.name}
-                      </div>
-                      <div style={{ fontSize: 10, color: THEME.textDim, marginTop: 2 }}>
-                        {trackEvents.length} events · {layers.length} layer{layers.length !== 1 ? 's' : ''}
-                      </div>
-                    </div>
-                    <div style={{ display: 'flex', gap: 4 }}>
-                      <SmallBtn active={track.muted} color="#E57373" onClick={() => toggleTrackMute(track.name)}>M</SmallBtn>
-                      <SmallBtn active={track.solo} color="#FFD54F" onClick={() => toggleTrackSolo(track.name)}>S</SmallBtn>
-                    </div>
-                  </div>
+                  <TrackHeader
+                    track={track} trackEvents={trackEvents} layers={layers}
+                    toggleTrackMute={toggleTrackMute} toggleTrackSolo={toggleTrackSolo}
+                    setTrackDragState={setTrackDragState} isDraggingTrack={isDraggingTrack} />
 
-                  {/* Events */}
-                  <div style={{ flex: 1, position: 'relative', overflow: 'hidden', cursor: 'pointer' }} onClick={handleTimelineClick}>
-                    {layers.map((layerNum, li) => (
-                      <div key={layerNum} style={{ position: 'absolute', top: 8 + li * LAYER_SUB_HEIGHT, left: 4, fontSize: 9, color: THEME.textMuted, fontFamily: "'JetBrains Mono', monospace", zIndex: 1, pointerEvents: 'none' }}>
-                        L{layerNum}
-                      </div>
-                    ))}
-
-                    {trackEvents.map((ev) => {
-                      const x = ev._start * pxPerSec - scrollX;
-                      const w = (ev._end - ev._start) * pxPerSec;
-                      const layerIdx = layers.indexOf(ev._layer);
-                      const y = 8 + layerIdx * LAYER_SUB_HEIGHT;
-                      const isSelected = selectedEvents.has(ev._id);
-                      const isLocked = !!getLockGroup(ev._id);
-                      const containerWidth = timelineRef.current?.clientWidth || 2000;
-                      if (x + w < -50 || x > containerWidth) return null;
-
-                      return (
-                        <div key={ev._id}
-                          style={{
-                            position: 'absolute', left: x, top: y, width: Math.max(w, 4), height: LAYER_SUB_HEIGHT - 4,
-                            background: isSelected ? `${track.color}CC` : `${track.color}66`,
-                            border: `1px solid ${isSelected ? track.color : `${track.color}88`}`,
-                            borderRadius: 3, cursor: dragState ? 'grabbing' : 'grab', display: 'flex', alignItems: 'center', overflow: 'hidden',
-                            boxShadow: isSelected ? `0 0 0 1px ${track.color}, 0 2px 8px rgba(0,0,0,0.3)` : 'none',
-                          }}
-                          onMouseDown={(e) => handleEventMouseDown(e, ev._id, 'move')}
-                          onClick={(e) => e.stopPropagation()}>
-                          <div style={{ position: 'absolute', left: 0, top: 0, width: 5, height: '100%', cursor: 'w-resize', zIndex: 2 }}
-                            onMouseDown={(e) => handleEventMouseDown(e, ev._id, 'resizeStart')} />
-                          <div style={{ position: 'absolute', right: 0, top: 0, width: 5, height: '100%', cursor: 'e-resize', zIndex: 2 }}
-                            onMouseDown={(e) => handleEventMouseDown(e, ev._id, 'resizeEnd')} />
-                          {isLocked && <span style={{ fontSize: 8, marginLeft: 3, color: THEME.lockIcon, flexShrink: 0 }}>🔗</span>}
-                          <span style={{ fontSize: 10, padding: '0 4px', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', color: '#fff', fontWeight: 500, textShadow: '0 1px 2px rgba(0,0,0,0.5)', pointerEvents: 'none' }}>
-                            {ev._text}
-                          </span>
-                        </div>
-                      );
-                    })}
-
-                    <div style={{ position: 'absolute', left: playheadTime * pxPerSec - scrollX, top: 0, width: 1, height: trackH, background: THEME.playhead, pointerEvents: 'none', zIndex: 20 }} />
-                    {markers.map((m) => (
-                      <div key={m.id} style={{ position: 'absolute', left: m.time * pxPerSec - scrollX - 1, top: 0, width: 2, height: trackH, background: THEME.marker, opacity: 0.6, pointerEvents: 'none', zIndex: 15 }} />
-                    ))}
-                  </div>
+                  <TrackLane
+                    track={track} layers={layers} trackH={trackH} trackEvents={trackEvents}
+                    pxPerSec={pxPerSec} scrollX={scrollX} selectedEvents={selectedEvents}
+                    getLockGroup={getLockGroup} dragState={dragState}
+                    handleEventMouseDown={handleEventMouseDown}
+                    handleTimelineClick={handleTimelineClick} playheadTime={playheadTime}
+                    markers={markers} timelineRef={timelineRef}
+                    masterEventId={masterEventId} onContextMenu={handleEventContextMenu} />
                 </div>
               );
             })}
@@ -781,25 +533,5 @@ export default function SubtitleAlignmentEditor() {
         <span>Ctrl+Z undo · Ctrl+Scroll to zoom · Space to play</span>
       </div>
     </div>
-  );
-}
-
-// ── Utility Components ──
-
-function ToolbarBtn({ children, onClick, disabled, title }) {
-  return (
-    <button onClick={onClick} disabled={disabled} title={title}
-      style={{ padding: '4px 10px', background: THEME.surfaceLight, color: disabled ? THEME.textMuted : THEME.text, border: `1px solid ${THEME.border}`, borderRadius: 6, fontSize: 13, cursor: disabled ? 'default' : 'pointer', opacity: disabled ? 0.5 : 1, lineHeight: 1 }}>
-      {children}
-    </button>
-  );
-}
-
-function SmallBtn({ children, active, color, onClick }) {
-  return (
-    <button onClick={onClick}
-      style={{ padding: '2px 8px', background: active ? color : THEME.surfaceLight, color: active ? '#000' : THEME.textDim, border: `1px solid ${active ? color : THEME.border}`, borderRadius: 3, fontSize: 10, fontWeight: 700, cursor: 'pointer' }}>
-      {children}
-    </button>
   );
 }
