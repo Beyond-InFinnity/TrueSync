@@ -34,11 +34,11 @@ Expected bundle size: ~140-170KB gzipped (React vendor chunk + app code).
 2. Framework preset: **Vite**
 3. Build command: `npm run build`
 4. Output directory: `dist`
-5. Add domain: `editor.nerv-analytic.ai`
+5. Add domain: `truesync.nerv-analytic.ai`
 
 In your DNS, add a CNAME record:
 ```
-editor.nerv-analytic.ai  →  cname.vercel-dns.com
+truesync.nerv-analytic.ai  →  cname.vercel-dns.com
 ```
 
 ### Option B: Cloudflare Pages
@@ -47,14 +47,14 @@ editor.nerv-analytic.ai  →  cname.vercel-dns.com
 npx wrangler pages deploy dist --project-name=subtitle-editor
 ```
 
-Then add custom domain `editor.nerv-analytic.ai` in the Cloudflare dashboard.
+Then add custom domain `truesync.nerv-analytic.ai` in the Cloudflare dashboard.
 
 ### Option C: Nginx (self-hosted / VPS)
 
 ```nginx
 server {
     listen 443 ssl http2;
-    server_name editor.nerv-analytic.ai;
+    server_name truesync.nerv-analytic.ai;
 
     root /var/www/subtitle-editor/dist;
     index index.html;
@@ -75,8 +75,8 @@ server {
     add_header X-Content-Type-Options "nosniff";
 
     # SSL config (use certbot or your provider)
-    ssl_certificate /etc/letsencrypt/live/editor.nerv-analytic.ai/fullchain.pem;
-    ssl_certificate_key /etc/letsencrypt/live/editor.nerv-analytic.ai/privkey.pem;
+    ssl_certificate /etc/letsencrypt/live/truesync.nerv-analytic.ai/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/truesync.nerv-analytic.ai/privkey.pem;
 }
 ```
 
@@ -97,7 +97,7 @@ ffmpeg -i input.mkv -c copy output.mp4
 Since this runs on a subdomain, you can link to it from `nerv-analytic.ai` with a simple anchor:
 
 ```html
-<a href="https://editor.nerv-analytic.ai">Subtitle Alignment Editor</a>
+<a href="https://truesync.nerv-analytic.ai">Subtitle Alignment Editor</a>
 ```
 
 If you later want shared auth, you can set cookies on `.nerv-analytic.ai` (note the leading dot) from the main site, and they'll be readable on the subdomain. But that's only needed if you add user accounts / session persistence.

@@ -40,12 +40,25 @@ export default function SubtitleAlignmentEditor() {
   const playOffsetRef = useRef(null);
   const animFrameRef = useRef(null);
   const videoRef = useRef(null);
+  const historyRef = useRef([]);
+  const historyIndexRef = useRef(-1);
+  const dragStartedRef = useRef(false);
+  const HISTORY_LIMIT = 50;
+
+  const [trackOrder, setTrackOrder] = useState([]);
+  const [trackDragState, setTrackDragState] = useState(null);
 
   // ── Derived state ──
   const visibleTracks = useMemo(() => {
     const hasSolo = tracks.some((t) => t.solo);
-    return tracks.filter((t) => (hasSolo ? t.solo : !t.muted));
-  }, [tracks]);
+    const filtered = tracks.filter((t) => (hasSolo ? t.solo : !t.muted));
+    if (trackOrder.length === 0) return filtered;
+    return [...filtered].sort((a, b) => {
+      const ai = trackOrder.indexOf(a.name);
+      const bi = trackOrder.indexOf(b.name);
+      return (ai === -1 ? Infinity : ai) - (bi === -1 ? Infinity : bi);
+    });
+  }, [tracks, trackOrder]);
 
   // ── Audio context ──
   const getAudioContext = useCallback(() => {
@@ -53,6 +66,30 @@ export default function SubtitleAlignmentEditor() {
       audioContextRef.current = new (window.AudioContext || window.webkitAudioContext)();
     }
     return audioContextRef.current;
+  }, []);
+
+  // ── Undo/Redo ──
+  const pushHistory = useCallback((eventsSnapshot) => {
+    const clone = eventsSnapshot.map(ev => ({ ...ev }));
+    const history = historyRef.current;
+    history.splice(historyIndexRef.current + 1);
+    history.push(clone);
+    if (history.length > HISTORY_LIMIT) {
+      history.splice(0, history.length - HISTORY_LIMIT);
+    }
+    historyIndexRef.current = history.length - 1;
+  }, []);
+
+  const undo = useCallback(() => {
+    if (historyIndexRef.current <= 0) return;
+    historyIndexRef.current -= 1;
+    setEvents(historyRef.current[historyIndexRef.current].map(ev => ({ ...ev })));
+  }, []);
+
+  const redo = useCallback(() => {
+    if (historyIndexRef.current >= historyRef.current.length - 1) return;
+    historyIndexRef.current += 1;
+    setEvents(historyRef.current[historyIndexRef.current].map(ev => ({ ...ev })));
   }, []);
 
   const loadAudio = useCallback(async (file) => {
@@ -122,8 +159,12 @@ export default function SubtitleAlignmentEditor() {
     reader.onload = (e) => {
       const parsed = parseASS(e.target.result);
       setAssData(parsed);
-      setEvents([...parsed.events]);
+      const initialEvents = [...parsed.events];
+      setEvents(initialEvents);
       setTracks([...parsed.tracks]);
+      setTrackOrder(parsed.tracks.map(t => t.name));
+      historyRef.current = [initialEvents.map(ev => ({ ...ev }))];
+      historyIndexRef.current = 0;
       if (parsed.events.length > 0) {
         const maxEnd = Math.max(...parsed.events.map((ev) => ev._end));
         setDuration((d) => Math.max(d, maxEnd + 10));
@@ -188,6 +229,13 @@ export default function SubtitleAlignmentEditor() {
   // ── Keyboard shortcuts ──
   useEffect(() => {
     const handler = (e) => {
+      const ctrlOrCmd = e.ctrlKey || e.metaKey;
+      if (ctrlOrCmd && e.code === 'KeyZ' && !showNumericInput) {
+        e.preventDefault();
+        if (e.shiftKey) redo();
+        else undo();
+        return;
+      }
       if (e.code === 'Space' && !showNumericInput) {
         e.preventDefault();
         togglePlayback();
@@ -208,15 +256,18 @@ export default function SubtitleAlignmentEditor() {
       if ((e.code === 'ArrowLeft' || e.code === 'ArrowRight') && selectedEvents.size > 0 && !showNumericInput) {
         e.preventDefault();
         const delta = (e.code === 'ArrowLeft' ? -1 : 1) * (e.shiftKey ? 0.1 : 0.01);
-        setEvents((evts) => evts.map((ev) => {
-          if (!selectedEvents.has(ev._id)) return ev;
-          return { ...ev, _start: ev._start + delta, _end: ev._end + delta };
-        }));
+        setEvents((evts) => {
+          pushHistory(evts);
+          return evts.map((ev) => {
+            if (!selectedEvents.has(ev._id)) return ev;
+            return { ...ev, _start: ev._start + delta, _end: ev._end + delta };
+          });
+        });
       }
     };
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
-  }, [togglePlayback, playheadTime, selectedEvents, showNumericInput]);
+  }, [togglePlayback, playheadTime, selectedEvents, showNumericInput, undo, redo, pushHistory]);
 
   // ── Lock groups ──
   const getLockGroup = useCallback((eventId) => lockGroups.find((g) => g.has(eventId)), [lockGroups]);
@@ -264,9 +315,12 @@ export default function SubtitleAlignmentEditor() {
   // ── Event drag ──
   const handleEventMouseDown = useCallback((e, eventId, mode) => {
     e.stopPropagation();
+    const ctrlOrCmd = e.ctrlKey || e.metaKey;
     const ev = events.find((ev) => ev._id === eventId);
     if (!ev) return;
-    if (e.shiftKey) {
+
+    // Ctrl/Cmd+click: toggle in selection, no drag
+    if (ctrlOrCmd) {
       setSelectedEvents((s) => {
         const ns = new Set(s);
         ns.has(eventId) ? ns.delete(eventId) : ns.add(eventId);
@@ -274,40 +328,141 @@ export default function SubtitleAlignmentEditor() {
       });
       return;
     }
-    if (!selectedEvents.has(eventId)) setSelectedEvents(new Set([eventId]));
-    setDragState({ mode, eventId, startX: e.clientX, origStart: ev._start, origEnd: ev._end });
-  }, [events, selectedEvents]);
+
+    // Shift+click: range select, no drag
+    if (e.shiftKey) {
+      setSelectedEvents((prev) => {
+        const allIds = [...prev, eventId];
+        const allEvts = allIds.map(id => events.find(ev => ev._id === id)).filter(Boolean);
+        const rangeStart = Math.min(...allEvts.map(ev => ev._start));
+        const rangeEnd = Math.max(...allEvts.map(ev => ev._end));
+        const trackNames = [...new Set(allEvts.map(ev => ev._style))];
+        const trackIndices = trackNames.map(n => trackOrder.indexOf(n)).filter(i => i !== -1);
+        const minTrack = Math.min(...trackIndices);
+        const maxTrack = Math.max(...trackIndices);
+        const tracksInRange = trackOrder.slice(minTrack, maxTrack + 1);
+        const visTrackNames = new Set(visibleTracks.map(t => t.name));
+        const ns = new Set();
+        for (const evt of events) {
+          if (!visTrackNames.has(evt._style)) continue;
+          if (!tracksInRange.includes(evt._style)) continue;
+          if (evt._end > rangeStart && evt._start < rangeEnd) {
+            ns.add(evt._id);
+          }
+        }
+        return ns;
+      });
+      return;
+    }
+
+    // Build snapshots map for all participating events
+    let pendingSelectId = null;
+    let activeSelection = selectedEvents;
+    if (!selectedEvents.has(eventId)) {
+      activeSelection = new Set([eventId]);
+      setSelectedEvents(activeSelection);
+    } else {
+      pendingSelectId = eventId;
+    }
+
+    const affected = getAffectedEvents(eventId);
+    const participants = new Set([...activeSelection, ...affected]);
+    const snapshots = {};
+    for (const id of participants) {
+      const evt = events.find(e => e._id === id);
+      if (evt) snapshots[id] = { origStart: evt._start, origEnd: evt._end };
+    }
+    const preEditSnapshot = events.map(ev => ({ ...ev }));
+    dragStartedRef.current = false;
+    setDragState({ mode, eventId, startX: e.clientX, snapshots, preEditSnapshot, pendingSelectId });
+  }, [events, selectedEvents, getAffectedEvents, trackOrder, visibleTracks]);
 
   useEffect(() => {
     if (!dragState) return;
     const handleMouseMove = (e) => {
+      if (!dragStartedRef.current) {
+        if (Math.abs(e.clientX - dragState.startX) < 4) return;
+        dragStartedRef.current = true;
+      }
       const deltaTime = (e.clientX - dragState.startX) / pxPerSec;
-      const affected = getAffectedEvents(dragState.eventId);
       setEvents((evts) => evts.map((ev) => {
-        const isTarget = ev._id === dragState.eventId;
-        const isAffected = affected.has(ev._id) && !isTarget;
-        const isSelected = selectedEvents.has(ev._id) && !isTarget;
-        if (!isTarget && !isAffected && !isSelected) return ev;
+        const snapshot = dragState.snapshots[ev._id];
+        if (!snapshot) return ev;
         if (dragState.mode === 'move') {
-          return { ...ev, _start: (isTarget ? dragState.origStart : ev._start) + deltaTime, _end: (isTarget ? dragState.origEnd : ev._end) + deltaTime };
+          return { ...ev, _start: snapshot.origStart + deltaTime, _end: snapshot.origEnd + deltaTime };
         }
-        if (dragState.mode === 'resizeStart' && isTarget) {
-          return { ...ev, _start: Math.min(dragState.origStart + deltaTime, ev._end - 0.01) };
+        if (dragState.mode === 'resizeStart' && ev._id === dragState.eventId) {
+          return { ...ev, _start: Math.min(snapshot.origStart + deltaTime, snapshot.origEnd - 0.01) };
         }
-        if (dragState.mode === 'resizeEnd' && isTarget) {
-          return { ...ev, _end: Math.max(dragState.origEnd + deltaTime, ev._start + 0.01) };
+        if (dragState.mode === 'resizeEnd' && ev._id === dragState.eventId) {
+          return { ...ev, _end: Math.max(snapshot.origEnd + deltaTime, snapshot.origStart + 0.01) };
         }
         return ev;
       }));
     };
-    const handleMouseUp = () => setDragState(null);
+    const handleMouseUp = () => {
+      if (dragStartedRef.current && dragState.preEditSnapshot) {
+        pushHistory(dragState.preEditSnapshot);
+      }
+      if (!dragStartedRef.current && dragState.pendingSelectId) {
+        setSelectedEvents(new Set([dragState.pendingSelectId]));
+      }
+      setDragState(null);
+    };
     window.addEventListener('mousemove', handleMouseMove);
     window.addEventListener('mouseup', handleMouseUp);
     return () => {
       window.removeEventListener('mousemove', handleMouseMove);
       window.removeEventListener('mouseup', handleMouseUp);
     };
-  }, [dragState, pxPerSec, getAffectedEvents, selectedEvents]);
+  }, [dragState, pxPerSec, pushHistory]);
+
+  // ── Track drag ──
+  useEffect(() => {
+    if (!trackDragState) return;
+    const handleMouseMove = (e) => {
+      setTrackDragState(s => s ? { ...s, currentY: e.clientY } : null);
+    };
+    const handleMouseUp = (e) => {
+      const deltaY = e.clientY - trackDragState.startY;
+      setTrackOrder(order => {
+        const newOrder = [...order];
+        const fromIdx = newOrder.indexOf(trackDragState.draggedTrack);
+        if (fromIdx === -1) return order;
+        const visTrackNames = visibleTracks.map(t => t.name);
+        const visIdx = visTrackNames.indexOf(trackDragState.draggedTrack);
+        if (visIdx === -1) return order;
+        let toVisIdx = visIdx;
+        let accumulated = 0;
+        if (deltaY > 0) {
+          for (let i = visIdx + 1; i < visibleTracks.length; i++) {
+            accumulated += getTrackHeight(visibleTracks[i]);
+            if (deltaY < accumulated) break;
+            toVisIdx = i;
+          }
+        } else {
+          for (let i = visIdx - 1; i >= 0; i--) {
+            accumulated -= getTrackHeight(visibleTracks[i]);
+            if (deltaY > accumulated) break;
+            toVisIdx = i;
+          }
+        }
+        const toTrack = visibleTracks[toVisIdx]?.name;
+        if (!toTrack || toTrack === trackDragState.draggedTrack) return order;
+        const toIdx = newOrder.indexOf(toTrack);
+        newOrder.splice(fromIdx, 1);
+        newOrder.splice(toIdx, 0, trackDragState.draggedTrack);
+        return newOrder;
+      });
+      setTrackDragState(null);
+    };
+    window.addEventListener('mousemove', handleMouseMove);
+    window.addEventListener('mouseup', handleMouseUp);
+    return () => {
+      window.removeEventListener('mousemove', handleMouseMove);
+      window.removeEventListener('mouseup', handleMouseUp);
+    };
+  }, [trackDragState, visibleTracks, getTrackHeight]);
 
   // ── Timeline click ──
   const handleTimelineClick = useCallback((e) => {
@@ -317,6 +472,7 @@ export default function SubtitleAlignmentEditor() {
     const time = Math.max(0, x / pxPerSec);
     setPlayheadTime(time);
     if (videoRef.current) videoRef.current.currentTime = time;
+    setSelectedEvents(new Set());
   }, [pxPerSec, scrollX, dragState]);
 
   // ── Numeric edit ──
@@ -324,16 +480,19 @@ export default function SubtitleAlignmentEditor() {
     const ms = parseFloat(numericValue);
     if (isNaN(ms)) return;
     const delta = ms / 1000;
-    setEvents((evts) => evts.map((ev) => {
-      if (!selectedEvents.has(ev._id)) return ev;
-      if (numericMode === 'shift') return { ...ev, _start: ev._start + delta, _end: ev._end + delta };
-      if (numericMode === 'extendStart') return { ...ev, _start: ev._start + delta };
-      if (numericMode === 'extendEnd') return { ...ev, _end: ev._end + delta };
-      return ev;
-    }));
+    setEvents((evts) => {
+      pushHistory(evts);
+      return evts.map((ev) => {
+        if (!selectedEvents.has(ev._id)) return ev;
+        if (numericMode === 'shift') return { ...ev, _start: ev._start + delta, _end: ev._end + delta };
+        if (numericMode === 'extendStart') return { ...ev, _start: ev._start + delta };
+        if (numericMode === 'extendEnd') return { ...ev, _end: ev._end + delta };
+        return ev;
+      });
+    });
     setShowNumericInput(false);
     setNumericValue('');
-  }, [numericValue, numericMode, selectedEvents]);
+  }, [numericValue, numericMode, selectedEvents, pushHistory]);
 
   // ── Waveform canvas rendering ──
   useEffect(() => {
@@ -475,9 +634,11 @@ export default function SubtitleAlignmentEditor() {
             <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 12 }}>
               {[
                 ['Space', 'Play / Pause'], ['M', 'Add marker at playhead'], ['N', 'Toggle numeric input'],
+                ['Ctrl+Z', 'Undo'], ['Ctrl+Shift+Z', 'Redo'],
                 ['← →', 'Nudge selected ±10ms'], ['Shift + ← →', 'Nudge selected ±100ms'],
                 ['Ctrl + Scroll', 'Zoom timeline'], ['Scroll', 'Pan timeline'],
-                ['Click event', 'Select event'], ['Shift + Click', 'Add/remove from selection'],
+                ['Click event', 'Select (deselects others)'], ['Ctrl + Click', 'Toggle event in selection'],
+                ['Shift + Click', 'Range select (time + track)'],
                 ['Drag event', 'Move event'], ['Drag edge', 'Resize event'], ['Esc', 'Clear selection / close panels'],
               ].map(([key, desc]) => (
                 <div key={key} style={{ display: 'flex', gap: 16, padding: '2px 0' }}>
@@ -533,12 +694,15 @@ export default function SubtitleAlignmentEditor() {
               const trackH = getTrackHeight(track);
               const trackEvents = events.filter((ev) => ev._style === track.name);
 
+              const isDraggingTrack = trackDragState?.draggedTrack === track.name;
               return (
-                <div key={track.name} style={{ display: 'flex', height: trackH, minHeight: trackH, borderBottom: `1px solid ${THEME.border}` }}>
+                <div key={track.name} style={{ display: 'flex', height: trackH, minHeight: trackH, borderBottom: `1px solid ${THEME.border}`, opacity: isDraggingTrack ? 0.6 : 1, cursor: isDraggingTrack ? 'grabbing' : undefined }}>
                   {/* Header */}
                   <div style={{ width: HEADER_WIDTH, minWidth: HEADER_WIDTH, background: THEME.surface, borderRight: `1px solid ${THEME.border}`, padding: '8px 12px', display: 'flex', flexDirection: 'column', justifyContent: 'space-between' }}>
                     <div>
                       <div style={{ fontSize: 12, fontWeight: 600, display: 'flex', alignItems: 'center', gap: 6 }}>
+                        <span style={{ cursor: 'grab', color: THEME.textDim, fontSize: 14, lineHeight: 1, userSelect: 'none' }}
+                          onMouseDown={(e) => { e.stopPropagation(); setTrackDragState({ draggedTrack: track.name, startY: e.clientY, currentY: e.clientY }); }}>⠿</span>
                         <div style={{ width: 10, height: 10, borderRadius: 2, background: track.color }} />
                         {track.name}
                       </div>
@@ -579,7 +743,8 @@ export default function SubtitleAlignmentEditor() {
                             borderRadius: 3, cursor: dragState ? 'grabbing' : 'grab', display: 'flex', alignItems: 'center', overflow: 'hidden',
                             boxShadow: isSelected ? `0 0 0 1px ${track.color}, 0 2px 8px rgba(0,0,0,0.3)` : 'none',
                           }}
-                          onMouseDown={(e) => handleEventMouseDown(e, ev._id, 'move')}>
+                          onMouseDown={(e) => handleEventMouseDown(e, ev._id, 'move')}
+                          onClick={(e) => e.stopPropagation()}>
                           <div style={{ position: 'absolute', left: 0, top: 0, width: 5, height: '100%', cursor: 'w-resize', zIndex: 2 }}
                             onMouseDown={(e) => handleEventMouseDown(e, ev._id, 'resizeStart')} />
                           <div style={{ position: 'absolute', right: 0, top: 0, width: 5, height: '100%', cursor: 'e-resize', zIndex: 2 }}
@@ -613,7 +778,7 @@ export default function SubtitleAlignmentEditor() {
         <span>{selectedEvents.size} selected · {lockGroups.length} lock groups</span>
         <span>Duration: {formatTimestamp(duration)}</span>
         <div style={{ flex: 1 }} />
-        <span>Ctrl+Scroll to zoom · Space to play</span>
+        <span>Ctrl+Z undo · Ctrl+Scroll to zoom · Space to play</span>
       </div>
     </div>
   );
