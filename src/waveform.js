@@ -71,3 +71,105 @@ export function renderWaveform(ctx, waveformData, viewStart, viewEnd, pxPerSec, 
 
   ctx.globalAlpha = 1;
 }
+
+/**
+ * Compute speech-frequency energy from an AudioBuffer.
+ * Bandpass filters 300Hz–3400Hz (speech range) then computes windowed RMS.
+ * Returns { energy: Float32Array, hopSize, sampleRate, windowSize }.
+ */
+export async function computeSpeechEnergy(audioBuffer, windowSize = 1024, hopSize = 256) {
+  const sampleRate = audioBuffer.sampleRate;
+  const length = audioBuffer.length;
+
+  const offline = new OfflineAudioContext(1, length, sampleRate);
+  const source = offline.createBufferSource();
+  source.buffer = audioBuffer;
+
+  // Bandpass via highpass 300Hz → lowpass 3400Hz
+  const highpass = offline.createBiquadFilter();
+  highpass.type = 'highpass';
+  highpass.frequency.value = 300;
+  highpass.Q.value = 0.7;
+
+  const lowpass = offline.createBiquadFilter();
+  lowpass.type = 'lowpass';
+  lowpass.frequency.value = 3400;
+  lowpass.Q.value = 0.7;
+
+  source.connect(highpass);
+  highpass.connect(lowpass);
+  lowpass.connect(offline.destination);
+  source.start(0);
+
+  const rendered = await offline.startRendering();
+  const filtered = rendered.getChannelData(0);
+
+  // Windowed RMS
+  const numFrames = Math.floor((length - windowSize) / hopSize) + 1;
+  const energy = new Float32Array(numFrames);
+  let maxEnergy = 0;
+
+  for (let i = 0; i < numFrames; i++) {
+    const offset = i * hopSize;
+    let sum = 0;
+    for (let j = 0; j < windowSize; j++) {
+      const s = filtered[offset + j];
+      sum += s * s;
+    }
+    const rms = Math.sqrt(sum / windowSize);
+    energy[i] = rms;
+    if (rms > maxEnergy) maxEnergy = rms;
+  }
+
+  // Normalize to 0–1
+  if (maxEnergy > 0) {
+    for (let i = 0; i < numFrames; i++) {
+      energy[i] /= maxEnergy;
+    }
+  }
+
+  return { energy, hopSize, sampleRate, windowSize };
+}
+
+/**
+ * Render speech energy overlay as a symmetric filled envelope on a canvas.
+ */
+export function renderSpeechOverlay(ctx, speechData, viewStart, viewEnd, pxPerSec, width, height, opacity) {
+  const { energy, hopSize, sampleRate } = speechData;
+  const mid = height / 2;
+  const scrollX = viewStart * pxPerSec;
+
+  const startFrame = Math.max(0, Math.floor(viewStart * sampleRate / hopSize) - 1);
+  const endFrame = Math.min(energy.length, Math.ceil(viewEnd * sampleRate / hopSize) + 1);
+
+  if (startFrame >= endFrame) return;
+
+  ctx.save();
+  ctx.globalAlpha = opacity;
+  ctx.fillStyle = '#FF4444';
+  ctx.beginPath();
+
+  // Top edge (left to right)
+  let firstX = null;
+  for (let i = startFrame; i < endFrame; i++) {
+    const x = (i * hopSize / sampleRate) * pxPerSec - scrollX;
+    const amp = energy[i] * mid * 0.9;
+    if (firstX === null) {
+      firstX = x;
+      ctx.moveTo(x, mid - amp);
+    } else {
+      ctx.lineTo(x, mid - amp);
+    }
+  }
+
+  // Bottom edge (right to left)
+  for (let i = endFrame - 1; i >= startFrame; i--) {
+    const x = (i * hopSize / sampleRate) * pxPerSec - scrollX;
+    const amp = energy[i] * mid * 0.9;
+    ctx.lineTo(x, mid + amp);
+  }
+
+  ctx.closePath();
+  ctx.fill();
+  ctx.restore();
+}

@@ -648,6 +648,7 @@ export default function SubtitleAlignmentEditor() {
   return (
     <div style={{ background: THEME.bg, color: THEME.text, width: '100vw', height: '100vh', display: 'flex', flexDirection: 'column', fontFamily: "'DM Sans', system-ui, sans-serif", overflow: 'hidden', userSelect: 'none' }}
       onDragOver={(e) => e.preventDefault()} onDrop={handleFileDrop}>
+      <style>{`@keyframes sae-spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }`}</style>
 
       <Toolbar
         isPlaying={isPlaying} togglePlayback={togglePlayback} setPlayheadTime={setPlayheadTime}
@@ -696,7 +697,7 @@ export default function SubtitleAlignmentEditor() {
             <Ruler scrollX={scrollX} pxPerSec={pxPerSec} timelineRef={timelineRef} gridDensity={gridDensity} />
 
             <WaveformLane
-              waveformData={waveformData} scrollX={scrollX} pxPerSec={pxPerSec}
+              waveformData={waveformData} audioBuffer={audioBuffer} scrollX={scrollX} pxPerSec={pxPerSec}
               handleTimelineClick={handleTimelineClick} playheadTime={playheadTime}
               timelineRef={timelineRef} />
 
