@@ -20,6 +20,7 @@ import TrackHeader from './components/TrackHeader.jsx';
 import TrackLane from './components/TrackLane.jsx';
 import ContextMenu from './components/ContextMenu.jsx';
 import SubtitleTrackSelector from './components/SubtitleTrackSelector.jsx';
+import Tooltip from './components/Tooltip.jsx';
 
 function formatFileSize(bytes) {
   if (bytes < 1024) return `${bytes} B`;
@@ -69,6 +70,7 @@ export default function SubtitleAlignmentEditor() {
 
   const timelineRef = useRef(null);
   const videoRef = useRef(null);
+  const mouseOverEditorRef = useRef(false);
 
   // ── Hooks ──
   const { pushHistory, undo, redo, initHistory } = useHistory(setEvents, setTracks);
@@ -326,6 +328,13 @@ export default function SubtitleAlignmentEditor() {
   // ── Keyboard shortcuts (data-driven via hotkeys state) ──
   useEffect(() => {
     const handler = (e) => {
+      // Skip when focus is in a text input or textarea
+      const tag = document.activeElement?.tagName;
+      if (tag === 'INPUT' || tag === 'TEXTAREA') return;
+
+      // Skip when a modal/overlay is open (except Escape to close them)
+      const modalOpen = showHelp || pendingMkvData || contextMenu;
+
       if (showNumericInput && e.code !== 'Escape') return;
 
       const actions = {
@@ -336,6 +345,7 @@ export default function SubtitleAlignmentEditor() {
         toggleNumeric:  () => { setShowNumericInput(true); },
         deselect:       () => { setSelectedEvents(new Set()); },
         clearSelection: () => { setShowNumericInput(false); setSelectedEvents(new Set()); setContextMenu(null); },
+        exportFile:     () => { e.preventDefault(); handleExport(); },
         nudgeLeft:      () => {
           if (selectedEvents.size === 0) return;
           e.preventDefault();
@@ -372,6 +382,15 @@ export default function SubtitleAlignmentEditor() {
 
       for (const [action, binding] of Object.entries(hotkeys)) {
         if (matchesHotkey(e, binding) && actions[action]) {
+          // Escape always works regardless of mouse position or modals
+          if (action === 'clearSelection') {
+            actions[action]();
+            return;
+          }
+          // Skip non-Escape actions when modal is open
+          if (modalOpen) return;
+          // Gate non-Escape actions: only fire when mouse is over the editor
+          if (!mouseOverEditorRef.current) return;
           actions[action]();
           return;
         }
@@ -379,7 +398,7 @@ export default function SubtitleAlignmentEditor() {
     };
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
-  }, [togglePlayback, playheadTime, selectedEvents, showNumericInput, undo, redo, pushHistory, tracks, hotkeys]);
+  }, [togglePlayback, playheadTime, selectedEvents, showNumericInput, undo, redo, pushHistory, tracks, hotkeys, showHelp, pendingMkvData, contextMenu, handleExport]);
 
   // ── Track drag ──
   useEffect(() => {
@@ -647,8 +666,11 @@ export default function SubtitleAlignmentEditor() {
 
   return (
     <div style={{ background: THEME.bg, color: THEME.text, width: '100vw', height: '100vh', display: 'flex', flexDirection: 'column', fontFamily: "'DM Sans', system-ui, sans-serif", overflow: 'hidden', userSelect: 'none' }}
-      onDragOver={(e) => e.preventDefault()} onDrop={handleFileDrop}>
+      onDragOver={(e) => e.preventDefault()} onDrop={handleFileDrop}
+      onMouseEnter={() => { mouseOverEditorRef.current = true; }}
+      onMouseLeave={() => { mouseOverEditorRef.current = false; }}>
       <style>{`@keyframes sae-spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }`}</style>
+      <Tooltip />
 
       <Toolbar
         isPlaying={isPlaying} togglePlayback={togglePlayback} setPlayheadTime={setPlayheadTime}
@@ -658,7 +680,8 @@ export default function SubtitleAlignmentEditor() {
         showHelp={showHelp} setShowHelp={setShowHelp}
         handleFileInput={handleFileInput} handleExport={handleExport} fileName={fileName}
         gridLines={gridLines} setGridLines={setGridLines}
-        gridDensity={gridDensity} setGridDensity={setGridDensity} />
+        gridDensity={gridDensity} setGridDensity={setGridDensity}
+        hotkeys={hotkeys} />
 
       {showNumericInput && (
         <NumericInput

@@ -14,6 +14,7 @@ export const DEFAULT_HOTKEYS = {
   nudgeRightBig:   { code: 'ArrowRight', ctrl: false, shift: true,  label: 'Nudge selected +100ms' },
   clearSelection:  { code: 'Escape',     ctrl: false, shift: false, label: 'Clear selection / close panels' },
   deselect:        { code: 'Delete',     ctrl: false, shift: false, label: 'Deselect all' },
+  exportFile:      { code: 'KeyS',      ctrl: true,  shift: false, label: 'Export .ass file' },
 };
 
 export function matchesHotkey(e, binding) {

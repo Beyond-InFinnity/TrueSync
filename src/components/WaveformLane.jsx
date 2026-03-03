@@ -1,6 +1,7 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
 import { renderWaveform, initSpeechCache, computeSpeechEnergyChunked, renderSpeechOverlay } from '../waveform.js';
 import { HEADER_WIDTH, WAVEFORM_HEIGHT, THEME } from '../theme.js';
+import { showTooltip, hideTooltip } from './Tooltip.jsx';
 
 export default function WaveformLane({ waveformData, audioBuffer, scrollX, pxPerSec, handleTimelineClick, playheadTime, timelineRef }) {
   const waveformCanvasRef = useRef(null);
@@ -173,20 +174,20 @@ export default function WaveformLane({ waveformData, audioBuffer, scrollX, pxPer
         {/* Speech overlay toggle */}
         <button
           onClick={() => setShowSpeechOverlay(v => !v)}
-          title={showSpeechOverlay ? 'Hide speech overlay (Shift+drag waveform to select region)' : 'Show speech overlay'}
+          onMouseEnter={(e) => showTooltip(e.currentTarget, showSpeechOverlay ? 'Hide speech overlay (Shift+drag to select region)' : 'Show speech overlay')}
+          onMouseLeave={hideTooltip}
           style={{
             marginLeft: 'auto',
-            width: 22, height: 22, padding: 0,
+            padding: '0 6px', height: 22,
             display: 'flex', alignItems: 'center', justifyContent: 'center',
             border: `1px solid ${showSpeechOverlay ? '#FF4444' : THEME.border}`,
             borderRadius: 4,
             background: showSpeechOverlay ? '#FF444433' : 'transparent',
             color: showSpeechOverlay ? '#FF4444' : THEME.textDim,
-            fontSize: 11, fontWeight: 700, cursor: 'pointer',
-            fontFamily: "'JetBrains Mono', monospace",
+            fontSize: 10, fontWeight: 700, cursor: 'pointer',
           }}
         >
-          S
+          Speech
         </button>
 
         {/* Progress text */}
@@ -203,7 +204,8 @@ export default function WaveformLane({ waveformData, audioBuffer, scrollX, pxPer
             min="0.1" max="1" step="0.05"
             value={speechOpacity}
             onChange={(e) => setSpeechOpacity(parseFloat(e.target.value))}
-            title={`Speech overlay opacity: ${Math.round(speechOpacity * 100)}%`}
+            onMouseEnter={(e) => showTooltip(e.currentTarget, `Speech overlay opacity: ${Math.round(speechOpacity * 100)}%`)}
+            onMouseLeave={hideTooltip}
             style={{ width: 50, height: 12, cursor: 'pointer', accentColor: '#FF4444' }}
           />
         )}

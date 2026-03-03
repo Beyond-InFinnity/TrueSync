@@ -1,10 +1,23 @@
 import { useState } from 'react';
 import { THEME } from '../theme.js';
 import { formatTimestamp } from '../assParser.js';
+import { hotkeyDisplayString } from '../hotkeys.js';
+import { showTooltip, hideTooltip } from './Tooltip.jsx';
 
-function ToolbarBtn({ children, onClick, disabled, title, active }) {
+function tooltipText(label, hotkeyAction, hotkeys) {
+  if (hotkeyAction && hotkeys && hotkeys[hotkeyAction]) {
+    return `${label} (${hotkeyDisplayString(hotkeys[hotkeyAction])})`;
+  }
+  return label;
+}
+
+function tip(e, text) { showTooltip(e.currentTarget, text); }
+
+function ToolbarBtn({ children, onClick, disabled, tooltip, active }) {
   return (
-    <button onClick={onClick} disabled={disabled} title={title}
+    <button onClick={onClick} disabled={disabled}
+      onMouseEnter={tooltip ? (e) => tip(e, tooltip) : undefined}
+      onMouseLeave={tooltip ? hideTooltip : undefined}
       style={{
         padding: '4px 10px', background: active ? THEME.accentDim : THEME.surfaceLight,
         color: disabled ? THEME.textMuted : THEME.text,
@@ -32,7 +45,7 @@ function GridOption({ label, value, current, onChange }) {
   );
 }
 
-export default function Toolbar({ isPlaying, togglePlayback, setPlayheadTime, videoRef, playheadTime, setMarkers, selectedEvents, lockSelected, unlockSelected, showNumericInput, setShowNumericInput, showHelp, setShowHelp, handleFileInput, handleExport, fileName, gridLines, setGridLines, gridDensity, setGridDensity }) {
+export default function Toolbar({ isPlaying, togglePlayback, setPlayheadTime, videoRef, playheadTime, setMarkers, selectedEvents, lockSelected, unlockSelected, showNumericInput, setShowNumericInput, showHelp, setShowHelp, handleFileInput, handleExport, fileName, gridLines, setGridLines, gridDensity, setGridDensity, hotkeys }) {
   const [showGridMenu, setShowGridMenu] = useState(false);
   const gridActive = gridLines !== 'off';
 
@@ -42,8 +55,8 @@ export default function Toolbar({ isPlaying, togglePlayback, setPlayheadTime, vi
       <span style={{ color: THEME.textDim, fontSize: 12, marginRight: 16, fontFamily: "'JetBrains Mono', monospace" }}>{fileName}</span>
 
       <div style={{ display: 'flex', gap: 4 }}>
-        <ToolbarBtn onClick={togglePlayback} title="Space">{isPlaying ? '⏸' : '▶'}</ToolbarBtn>
-        <ToolbarBtn onClick={() => { setPlayheadTime(0); if (videoRef.current) videoRef.current.currentTime = 0; }} title="Return to start">⏮</ToolbarBtn>
+        <ToolbarBtn onClick={togglePlayback} tooltip={tooltipText('Play / Pause', 'togglePlayback', hotkeys)}>{isPlaying ? '⏸' : '▶'}</ToolbarBtn>
+        <ToolbarBtn onClick={() => { setPlayheadTime(0); if (videoRef.current) videoRef.current.currentTime = 0; }} tooltip="Return to start">⏮</ToolbarBtn>
       </div>
 
       <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 13, color: THEME.accent, minWidth: 100 }}>
@@ -52,11 +65,11 @@ export default function Toolbar({ isPlaying, togglePlayback, setPlayheadTime, vi
 
       <div style={{ flex: 1 }} />
 
-      <ToolbarBtn onClick={() => setMarkers((m) => [...m, { time: playheadTime, id: Date.now() }])} title="Add marker (M)">📍</ToolbarBtn>
+      <ToolbarBtn onClick={() => setMarkers((m) => [...m, { time: playheadTime, id: Date.now() }])} tooltip={tooltipText('Add Marker', 'addMarker', hotkeys)}>Marker</ToolbarBtn>
 
       {/* Grid settings button */}
       <div style={{ position: 'relative' }}>
-        <ToolbarBtn onClick={() => setShowGridMenu(!showGridMenu)} title="Grid settings" active={gridActive}>┋</ToolbarBtn>
+        <ToolbarBtn onClick={() => setShowGridMenu(!showGridMenu)} tooltip="Grid Settings" active={gridActive}>Grid</ToolbarBtn>
         {showGridMenu && (
           <>
             <div style={{ position: 'fixed', inset: 0, zIndex: 49 }} onClick={() => setShowGridMenu(false)} />
@@ -83,10 +96,10 @@ export default function Toolbar({ isPlaying, togglePlayback, setPlayheadTime, vi
         )}
       </div>
 
-      <ToolbarBtn onClick={lockSelected} disabled={selectedEvents.size < 2} title="Lock selected">🔗</ToolbarBtn>
-      <ToolbarBtn onClick={unlockSelected} title="Unlock selected">🔓</ToolbarBtn>
-      <ToolbarBtn onClick={() => setShowNumericInput(!showNumericInput)} title="Numeric edit (N)">#±</ToolbarBtn>
-      <ToolbarBtn onClick={() => setShowHelp(!showHelp)} title="Help">?</ToolbarBtn>
+      <ToolbarBtn onClick={lockSelected} disabled={selectedEvents.size < 2} tooltip="Lock Selected">Lock</ToolbarBtn>
+      <ToolbarBtn onClick={unlockSelected} tooltip="Unlock Selected">Unlock</ToolbarBtn>
+      <ToolbarBtn onClick={() => setShowNumericInput(!showNumericInput)} tooltip={tooltipText('Numeric Edit', 'toggleNumeric', hotkeys)}>Numeric</ToolbarBtn>
+      <ToolbarBtn onClick={() => setShowHelp(!showHelp)} tooltip="Hotkeys">Hotkeys</ToolbarBtn>
 
       <div style={{ width: 1, height: 24, background: THEME.border, margin: '0 4px' }} />
 
@@ -95,7 +108,10 @@ export default function Toolbar({ isPlaying, togglePlayback, setPlayheadTime, vi
         <input type="file" multiple accept=".ass,.ssa,.wav,.mp3,.ogg,.flac,.m4a,.mp4,.mkv,.webm" onChange={handleFileInput} style={{ display: 'none' }} />
       </label>
 
-      <button onClick={handleExport} style={{ padding: '4px 16px', background: THEME.accent, color: '#000', border: 'none', borderRadius: 6, fontWeight: 600, fontSize: 12, cursor: 'pointer' }}>
+      <button onClick={handleExport}
+        onMouseEnter={(e) => tip(e, tooltipText('Export .ass File', 'exportFile', hotkeys))}
+        onMouseLeave={hideTooltip}
+        style={{ padding: '4px 16px', background: THEME.accent, color: '#000', border: 'none', borderRadius: 6, fontWeight: 600, fontSize: 12, cursor: 'pointer' }}>
         Export .ass
       </button>
     </div>

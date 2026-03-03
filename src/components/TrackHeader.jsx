@@ -1,8 +1,11 @@
 import { THEME } from '../theme.js';
+import { showTooltip, hideTooltip } from './Tooltip.jsx';
 
-function SmallBtn({ children, active, color, onClick, title }) {
+function SmallBtn({ children, active, color, onClick, tooltip }) {
   return (
-    <button onClick={onClick} title={title}
+    <button onClick={onClick}
+      onMouseEnter={tooltip ? (e) => showTooltip(e.currentTarget, tooltip) : undefined}
+      onMouseLeave={tooltip ? hideTooltip : undefined}
       style={{ padding: '2px 8px', background: active ? color : THEME.surfaceLight, color: active ? '#000' : THEME.textDim, border: `1px solid ${active ? color : THEME.border}`, borderRadius: 3, fontSize: 10, fontWeight: 700, cursor: 'pointer' }}>
       {children}
     </button>
@@ -24,8 +27,8 @@ export default function TrackHeader({ track, trackEvents, layers, toggleTrackMut
         </div>
       </div>
       <div style={{ display: 'flex', gap: 4 }}>
-        <SmallBtn active={track.muted} color="#E57373" onClick={() => toggleTrackMute(track.name)} title="Mute — hide this track">M</SmallBtn>
-        <SmallBtn active={track.solo} color="#FFD54F" onClick={() => toggleTrackSolo(track.name)} title="Solo — show only this track">S</SmallBtn>
+        <SmallBtn active={track.muted} color="#E57373" onClick={() => toggleTrackMute(track.name)} tooltip="Mute — hide this track">Mute</SmallBtn>
+        <SmallBtn active={track.solo} color="#FFD54F" onClick={() => toggleTrackSolo(track.name)} tooltip="Solo — show only this track">Solo</SmallBtn>
       </div>
     </div>
   );
